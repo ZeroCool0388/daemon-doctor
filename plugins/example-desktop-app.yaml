@@ -1,0 +1,23 @@
+# Fictional plug-in. example-desktop-app is not a real program.
+id: example-desktop-app
+name: Example Desktop App
+process:
+  match: example-desktop-app
+checks:
+  # Cheapest first. Later checks run only after earlier ones pass.
+  - type: process_running
+  - type: outbound_tcp
+    port: 443
+    consecutive: 3
+messages:
+  down: "Example Desktop App has stopped. It is not running."
+  stuck: "Example Desktop App is open but has no established outbound connection on port 443, so it looks stuck."
+  keeps_happening: "Example Desktop App has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  # Optional launcher on either action: an absolute path to a program.
+  # It is executed directly, with no shell and no arguments.
+  # Leave it unset to only signal the process.
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart
