@@ -1,0 +1,33 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+go.work
+go.work.sum
+vendor/
+
+# Local real config, keys and secrets (never commit)
+config.local.yaml
+config.yaml
+!config.example.yaml
+*.key
+*.pem
+*.p12
+.env
+.env.*
+!.env.example
+google-services.json
+*.keystore
+*.jks
+.wrangler/
+.dev.vars
+logs/
+*.log
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

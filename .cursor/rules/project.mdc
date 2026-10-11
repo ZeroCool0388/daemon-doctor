@@ -1,0 +1,40 @@
+---
+description: Project rules for the Daemon Doctor repo
+alwaysApply: true
+---
+
+# Daemon Doctor
+
+Go 1.25 program for macOS that watches local apps and background services, raises plain-English alerts, and runs fixes only after a signed approval. Plug-ins are YAML files in `plugins/`. The plan is in `docs/plan.md`.
+
+## No AI in the decision or fix path
+
+Detection, alerting and fixing use fixed rules only. Never add an LLM or AI call anywhere in checks, rules, alerts or fixes. Fixes come only from the allowlist in each plug-in's config. Never run a command that came from a message, the relay, or any remote source.
+
+## Synthetic data only
+
+Synthetic data only. Test traces, demo services and examples are fictional. Never add real hostnames, IP addresses, usernames, logs, or personal data. No employer names or work data of any kind.
+
+## No secrets in code
+
+No secrets in code. Do not commit real keys, relay URLs, FCM credentials or pairing keys. The real config lives at `~/.config/daemon-doctor/config.yaml` and stays out of the repo. `config.example.yaml` holds placeholders only. Keep `*.key`, `*.pem`, `config.local.yaml` and `.env*` gitignored.
+
+## Tests before a commit or pull request
+
+These must pass before any commit or pull request. They are the checks in `.github/workflows/ci.yml`:
+
+- `gofmt -l .` prints nothing
+- `go vet ./...`
+- `go test ./...`
+
+## README
+
+The README follows this order: problem, who it's for, demo GIF, live demo or replay, architecture diagram, eval or test results, cost and latency, limits and next steps. Only real measured numbers. Never invent metrics, test results, cost, or latency.
+
+## Demo mode
+
+Demo mode runs fake services and scripted incidents with no Mac, accounts, keys or paid calls. CI must run without secrets. Zero running cost.
+
+## Least privilege
+
+Run as the normal user, never root. Read-only checks by default. Every fix is re-checked and logged locally with secrets blanked.
