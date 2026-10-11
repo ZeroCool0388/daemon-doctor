@@ -1,0 +1,214 @@
+package fixes
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
+	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
+	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
+)
+
+func plugin(launcher string) plugins.Plugin {
+	fixes := map[string]plugins.Fix{
+		plugins.FixRestart:      {Kind: plugins.FixRestart, Launcher: launcher},
+		plugins.FixForceRestart: {Kind: plugins.FixForceRestart, Launcher: launcher},
+	}
+	return plugins.Plugin{
+		ID:      "example-desktop-app",
+		Name:    "Example Desktop App",
+		Process: plugins.ProcessMatch{Match: "example-desktop-app"},
+		Checks: []plugins.Check{
+			{Type: plugins.CheckProcessRunning},
+			{Type: plugins.CheckOutboundTCP, Port: 443, Consecutive: 1},
+		},
+		Fixes: fixes,
+	}
+}
+
+func tree(ports ...int) sysprobe.Snapshot {
+	s := sysprobe.Snapshot{
+		Processes: []sysprobe.Process{
+			{PID: 4, PPID: 1, Name: "example-desktop-app", Exe: "example-desktop-app"},
+			{PID: 6, PPID: 4, Name: "helper", Exe: "helper"},
+		},
+		OutboundPorts: map[int][]int{},
+	}
+	if len(ports) > 0 {
+		s.OutboundPorts[6] = append([]int(nil), ports...)
+	}
+	return s
+}
+
+type fakeCtrl struct {
+	sigs     []syscall.Signal
+	pids     []int
+	launches []string
+}
+
+func (f *fakeCtrl) Signal(pid int, sig syscall.Signal) error {
+	f.pids = append(f.pids, pid)
+	f.sigs = append(f.sigs, sig)
+	return nil
+}
+
+func (f *fakeCtrl) Launch(_ context.Context, path string) error {
+	f.launches = append(f.launches, path)
+	return nil
+}
+
+type recordingCtrl struct {
+	fakeCtrl
+}
+
+func TestDryRunDoesNotSignalAndStillRechecks(t *testing.T) {
+	ctrl := &recordingCtrl{}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree()}}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err := runner.Apply(context.Background(), plugin(""), plugins.FixRestart, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
+		t.Fatalf("dry-run called the controller: %+v", ctrl)
+	}
+	if src.Takes != 2 {
+		t.Fatalf("takes = %d, want 2", src.Takes)
+	}
+	if res.Fixed {
+		t.Fatal("recheck should still see the failure")
+	}
+	if !strings.Contains(res.Message, "Dry run") || !strings.Contains(res.Detail, "TERM") {
+		t.Fatalf("result: %+v", res)
+	}
+}
+
+func TestRestartAndForceRestartAreAllowlisted(t *testing.T) {
+	launch := "/opt/example-desktop-app-launch"
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{
+		tree(),
+		tree(443),
+	}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err := runner.Apply(context.Background(), plugin(launch), plugins.FixRestart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Fixed {
+		t.Fatalf("expected a healthy recheck: %+v", res)
+	}
+	if !strings.HasPrefix(res.Message, "Fixed.") {
+		t.Fatalf("message: %q", res.Message)
+	}
+	if len(ctrl.pids) != 2 || ctrl.pids[0] != 6 || ctrl.pids[1] != 4 {
+		t.Fatalf("signal order: %v", ctrl.pids)
+	}
+	if len(ctrl.sigs) != 2 || ctrl.sigs[0] != syscall.SIGTERM {
+		t.Fatalf("signals: %v", ctrl.sigs)
+	}
+	if len(ctrl.launches) != 1 || ctrl.launches[0] != launch {
+		t.Fatalf("launches: %v", ctrl.launches)
+	}
+
+	src = &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree()}}
+	ctrl = &recordingCtrl{}
+	runner = &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err = runner.Apply(context.Background(), plugin(""), plugins.FixForceRestart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Fixed || !strings.HasPrefix(res.Message, "Didn't work.") {
+		t.Fatalf("result: %+v", res)
+	}
+	if ctrl.sigs[0] != syscall.SIGKILL {
+		t.Fatalf("signals: %v", ctrl.sigs)
+	}
+	if len(ctrl.launches) != 0 {
+		t.Fatalf("launcher should be unset: %v", ctrl.launches)
+	}
+}
+
+func TestUnknownFixIsNotExecuted(t *testing.T) {
+	ctrl := &recordingCtrl{}
+	src := &sysprobe.MemSource{}
+	src.Set(tree())
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	for _, action := range []string{"echo hello", "restart; touch /tmp/marker", plugins.FixForceRestart} {
+		p := plugin("")
+		if action == plugins.FixForceRestart {
+			delete(p.Fixes, plugins.FixForceRestart)
+		}
+		if _, err := runner.Apply(context.Background(), p, action, false); err == nil {
+			t.Fatalf("action %q should be refused", action)
+		}
+	}
+	if src.Takes != 0 || len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
+		t.Fatalf("refused fix still ran: takes %d pids %v launches %v", src.Takes, ctrl.pids, ctrl.launches)
+	}
+}
+
+func TestRefusesToSignalInit(t *testing.T) {
+	snap := sysprobe.Snapshot{Processes: []sysprobe.Process{
+		{PID: 1, PPID: 0, Name: "example-desktop-app", Exe: "example-desktop-app"},
+	}}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{snap, snap}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err := runner.Apply(context.Background(), plugin(""), plugins.FixRestart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.pids) != 0 {
+		t.Fatalf("signalled pids: %v", ctrl.pids)
+	}
+	if !strings.Contains(res.SignalError, "refusing") {
+		t.Fatalf("result: %+v", res)
+	}
+}
+
+func TestOSControllerRefusesPrivilegedPIDsAndLaunchesWithoutArgs(t *testing.T) {
+	ctrl := OSController{}
+	if err := ctrl.Signal(1, syscall.SIGTERM); err == nil {
+		t.Fatal("pid 1 should be refused")
+	}
+	if err := ctrl.Signal(os.Getpid(), syscall.SIGTERM); err == nil {
+		t.Fatal("own pid should be refused")
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	script := filepath.Join(dir, "launch-example")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$#\" > '" + marker + "'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := ctrl.Launch(ctx, script); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(marker)
+		if err == nil {
+			if strings.TrimSpace(string(data)) != "0" {
+				t.Fatalf("launcher received arguments: %q", data)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("launcher did not run")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

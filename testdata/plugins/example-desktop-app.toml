@@ -1,0 +1,25 @@
+# Fictional plug-in, same service as plugins/example-desktop-app.yaml.
+id = "example-desktop-app"
+name = "Example Desktop App"
+
+[process]
+match = "example-desktop-app"
+
+[[checks]]
+type = "process_running"
+
+[[checks]]
+type = "outbound_tcp"
+port = 443
+consecutive = 3
+
+[messages]
+down = "Example Desktop App has stopped. It is not running."
+stuck = "Example Desktop App is open but has no established outbound connection on port 443, so it looks stuck."
+keeps_happening = "Example Desktop App has failed 3 times in the last hour. Automatic fixes are paused."
+
+[fixes.restart]
+kind = "restart"
+
+[fixes."force-restart"]
+kind = "force-restart"
