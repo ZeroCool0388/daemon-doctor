@@ -1,0 +1,21 @@
+# ChatGPT app. Change process.match if the executable name differs.
+id: chatgpt
+name: ChatGPT
+process:
+  match: ChatGPT
+checks:
+  - type: process_running
+  - type: outbound_tcp
+    port: 443
+    consecutive: 3
+messages:
+  down: "ChatGPT has stopped. It is not running."
+  stuck: "ChatGPT is running but it has no established outbound connection on port 443."
+  keeps_happening: "ChatGPT has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart

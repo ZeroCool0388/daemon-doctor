@@ -1,6 +1,7 @@
-// Package fixes runs restart and force-restart, and only those.
-// The action has to be on the plug-in's allowlist. Dry-run does not
-// signal or launch anything, and every attempt is rechecked.
+// Package fixes runs stop, restart, and force-restart, and only those.
+// The action has to be on the plug-in's allowlist, except an unwatched
+// stop which the caller has already authorized. Dry-run does not signal
+// or launch anything, and every attempt is rechecked. stop never launches.
 package fixes
 
 import (
@@ -75,55 +76,115 @@ func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dry
 		sig = syscall.SIGKILL
 		sigName = "KILL"
 	}
+	launch := fix.Launcher
+	if action == plugins.FixStop {
+		launch = ""
+	}
 	res := Result{
 		Action: action,
 		DryRun: dryRun,
 		PIDs:   pids,
 		Signal: sigName,
 	}
-	if dryRun {
-		res.WouldLaunch = fix.Launcher
-	} else if r.Control == nil {
-		return Result{}, fmt.Errorf("no fix controller is configured")
-	} else {
-		for _, pid := range pids {
-			if refused(pid) {
-				res.SignalError = fmt.Sprintf("refusing to signal pid %d", pid)
-				continue
-			}
-			if err := r.Control.Signal(pid, sig); err != nil {
-				res.SignalError = err.Error()
-			}
-		}
-		if fix.Launcher != "" {
-			if err := r.Control.Launch(ctx, fix.Launcher); err != nil {
-				res.LaunchError = err.Error()
-			} else {
-				res.Launched = fix.Launcher
-			}
-		}
+	if err := r.signal(ctx, &res, pids, sig, launch, dryRun); err != nil {
+		return Result{}, err
 	}
 
 	recheck, err := r.Source.Take(ctx)
 	if err != nil {
 		res.Duration = time.Since(start)
-		res.Detail = detail(res, fix.Launcher)
+		res.Detail = detail(res, launch)
 		res.Message = plainMessage(p.Name, res)
 		return res, err
 	}
 	outcomes, err := r.Checks.Run(p, recheck)
 	if err != nil {
 		res.Duration = time.Since(start)
-		res.Detail = detail(res, fix.Launcher)
+		res.Detail = detail(res, launch)
 		res.Message = plainMessage(p.Name, res)
 		return res, err
 	}
 	res.Outcomes = outcomes
 	res.Fixed = checks.AllHealthy(outcomes)
 	res.Duration = time.Since(start)
-	res.Detail = detail(res, fix.Launcher)
+	res.Detail = detail(res, launch)
 	res.Message = plainMessage(p.Name, res)
 	return res, nil
+}
+
+// ApplyStop signals an unwatched process by its exact name. It never launches.
+// The caller decides whether this name was named by a hog rule.
+func (r *Runner) ApplyStop(ctx context.Context, processName string, dryRun bool) (Result, error) {
+	start := time.Now()
+	processName = strings.TrimSpace(processName)
+	if err := ValidProcessName(processName); err != nil {
+		return Result{}, err
+	}
+	snap, err := r.Source.Take(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	pids := sysprobe.SignalOrder(snap, sysprobe.RootPIDs(snap, processName))
+	res := Result{
+		Action: plugins.FixStop,
+		DryRun: dryRun,
+		PIDs:   pids,
+		Signal: "TERM",
+	}
+	if err := r.signal(ctx, &res, pids, syscall.SIGTERM, "", dryRun); err != nil {
+		return Result{}, err
+	}
+	recheck, err := r.Source.Take(ctx)
+	if err != nil {
+		res.Duration = time.Since(start)
+		res.Detail = detail(res, "")
+		res.Message = plainMessage(processName, res)
+		return res, err
+	}
+	res.Fixed = len(sysprobe.RootPIDs(recheck, processName)) == 0
+	res.Duration = time.Since(start)
+	res.Detail = detail(res, "")
+	res.Message = plainMessage(processName, res)
+	return res, nil
+}
+
+// ValidProcessName rejects an empty name and shell metacharacters.
+func ValidProcessName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("process name is required")
+	}
+	if strings.ContainsAny(name, ";|&`$\\\n\r\x00") {
+		return fmt.Errorf("process name contains a character that is not allowed")
+	}
+	return nil
+}
+
+func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscall.Signal, launch string, dryRun bool) error {
+	if dryRun {
+		res.WouldLaunch = launch
+		return nil
+	}
+	if r.Control == nil {
+		return fmt.Errorf("no fix controller is configured")
+	}
+	for _, pid := range pids {
+		if refused(pid) {
+			res.SignalError = fmt.Sprintf("refusing to signal pid %d", pid)
+			continue
+		}
+		if err := r.Control.Signal(pid, sig); err != nil {
+			res.SignalError = err.Error()
+		}
+	}
+	if launch != "" {
+		if err := r.Control.Launch(ctx, launch); err != nil {
+			res.LaunchError = err.Error()
+		} else {
+			res.Launched = launch
+		}
+	}
+	return nil
 }
 
 func refused(pid int) bool {

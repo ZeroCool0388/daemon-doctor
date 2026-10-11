@@ -1,0 +1,25 @@
+# Machine-wide checks. Readings come from the local system. No process is named.
+id: this-mac
+name: This Mac
+host: true
+checks:
+  - type: sleep_state
+  - type: network
+  - type: disk_free
+    min_free_percent: 10
+  - type: memory_pressure
+    level: warn
+    duration: 5m
+  - type: cpu
+    cpu_percent: 85
+    duration: 5m
+messages:
+  sleep: "The Mac went to sleep."
+  wake: "The Mac woke up."
+  network_down: "The Mac lost its network connection at {time}. Other alerts are paused until it is back."
+  network_back: "The network is back at {time}. {ok} of {total} services look healthy."
+  disk_low: "Free disk space is low: {free}% is left."
+  cpu_hog: "{name} has used {percent}% of the CPU for {duration}."
+  memory_hog: "{name} is the largest memory user, and memory pressure has stayed at {level} for {duration}."
+  cpu_hog_unwatched: "A process that is not on the watched list ({process}) has used {percent}% of the CPU for {duration}."
+  memory_hog_unwatched: "A process that is not on the watched list ({process}) is the largest memory user, and memory pressure has stayed at {level} for {duration}."

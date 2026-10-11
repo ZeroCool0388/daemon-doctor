@@ -1,0 +1,17 @@
+# Syncthing. Change process.match if the executable name differs.
+id: syncthing
+name: Syncthing
+process:
+  match: syncthing
+checks:
+  - type: process_running
+messages:
+  down: "Syncthing has stopped. It is not running."
+  keeps_happening: "Syncthing has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart

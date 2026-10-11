@@ -129,7 +129,14 @@ func readProcess(root string, pid int) (Process, error) {
 			cmd = strings.Join(parts, " ")
 		}
 	}
-	return Process{PID: pid, PPID: ppid, Name: name, Exe: exe, Cmd: cmd}, nil
+	proc := Process{PID: pid, PPID: ppid, Name: name, Exe: exe, Cmd: cmd}
+	if statm, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "statm")); err == nil {
+		if pages, ok := parseStatmResident(string(statm)); ok {
+			proc.MemoryKnown = true
+			proc.MemoryBytes = pages * int64(os.Getpagesize())
+		}
+	}
+	return proc, nil
 }
 
 // parseStat reads "pid (comm) state ppid ..." from /proc/pid/stat.

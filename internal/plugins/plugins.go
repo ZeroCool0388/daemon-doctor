@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
@@ -20,12 +21,25 @@ import (
 const (
 	CheckProcessRunning = "process_running"
 	CheckOutboundTCP    = "outbound_tcp"
+	CheckSleep          = "sleep_state"
+	CheckNetwork        = "network"
+	CheckDisk           = "disk_free"
+	CheckMemory         = "memory_pressure"
+	CheckCPU            = "cpu"
+	FixStop             = "stop"
 	FixRestart          = "restart"
 	FixForceRestart     = "force-restart"
+
+	// DefaultCPUPercent and DefaultDuration are used when a host plug-in
+	// omits them. The shipped this-mac plug-in sets both explicitly.
+	DefaultCPUPercent  = 85
+	DefaultDuration    = 5 * time.Minute
+	DefaultMemoryLevel = "warn"
 )
 
 // FixAllowlist is the only set of fix actions the program will run.
 var FixAllowlist = map[string]struct{}{
+	FixStop:         {},
 	FixRestart:      {},
 	FixForceRestart: {},
 }
@@ -35,14 +49,21 @@ var FixAllowlist = map[string]struct{}{
 func BuiltinCosts() map[string]int {
 	return map[string]int{
 		CheckProcessRunning: 10,
+		CheckSleep:          12,
+		CheckNetwork:        13,
+		CheckDisk:           14,
+		CheckMemory:         15,
+		CheckCPU:            16,
 		CheckOutboundTCP:    20,
 	}
 }
 
-// Plugin is one watched service.
+// Plugin is one watched service. Host plug-ins describe the machine
+// itself and do not name a process.
 type Plugin struct {
 	ID       string         `yaml:"id" toml:"id"`
 	Name     string         `yaml:"name" toml:"name"`
+	Host     bool           `yaml:"host" toml:"host"`
 	Process  ProcessMatch   `yaml:"process" toml:"process"`
 	Checks   []Check        `yaml:"checks" toml:"checks"`
 	Messages Messages       `yaml:"messages" toml:"messages"`
@@ -57,22 +78,36 @@ type ProcessMatch struct {
 
 // Check is one health check. Checks run in file order.
 type Check struct {
-	Type        string `yaml:"type" toml:"type"`
-	Port        int    `yaml:"port" toml:"port"`
-	Consecutive int    `yaml:"consecutive" toml:"consecutive"`
+	Type           string  `yaml:"type" toml:"type"`
+	Port           int     `yaml:"port" toml:"port"`
+	Consecutive    int     `yaml:"consecutive" toml:"consecutive"`
+	MinFreePercent float64 `yaml:"min_free_percent" toml:"min_free_percent"`
+	CPUPercent     float64 `yaml:"cpu_percent" toml:"cpu_percent"`
+	Duration       string  `yaml:"duration" toml:"duration"`
+	Level          string  `yaml:"level" toml:"level"`
 }
 
 // Messages are the plain-English lines used when a rule fires.
-// {name} is replaced with the plug-in name.
+// Placeholders such as {name}, {percent}, and {duration} are filled
+// from the sample that raised the alert.
 type Messages struct {
-	Down           string `yaml:"down" toml:"down"`
-	Stuck          string `yaml:"stuck" toml:"stuck"`
-	KeepsHappening string `yaml:"keeps_happening" toml:"keeps_happening"`
+	Down               string `yaml:"down" toml:"down"`
+	Stuck              string `yaml:"stuck" toml:"stuck"`
+	KeepsHappening     string `yaml:"keeps_happening" toml:"keeps_happening"`
+	Sleep              string `yaml:"sleep" toml:"sleep"`
+	Wake               string `yaml:"wake" toml:"wake"`
+	NetworkDown        string `yaml:"network_down" toml:"network_down"`
+	NetworkBack        string `yaml:"network_back" toml:"network_back"`
+	DiskLow            string `yaml:"disk_low" toml:"disk_low"`
+	CPUHog             string `yaml:"cpu_hog" toml:"cpu_hog"`
+	MemoryHog          string `yaml:"memory_hog" toml:"memory_hog"`
+	CPUHogUnwatched    string `yaml:"cpu_hog_unwatched" toml:"cpu_hog_unwatched"`
+	MemoryHogUnwatched string `yaml:"memory_hog_unwatched" toml:"memory_hog_unwatched"`
 }
 
-// Fix is one approved action. Kind must be restart or force-restart.
+// Fix is one approved action. Kind must be stop, restart, or force-restart.
 // Launcher, when set, is an absolute program path executed directly
-// with no shell and no arguments.
+// with no shell and no arguments. stop never launches a program.
 type Fix struct {
 	Kind     string `yaml:"kind" toml:"kind"`
 	Launcher string `yaml:"launcher" toml:"launcher"`
@@ -116,6 +151,9 @@ func LoadDir(dir string) ([]Plugin, error) {
 		plugins = append(plugins, p)
 	}
 	sort.Slice(plugins, func(i, j int) bool { return plugins[i].ID < plugins[j].ID })
+	if err := ValidateAll(plugins, BuiltinCosts()); err != nil {
+		return nil, err
+	}
 	return plugins, nil
 }
 
@@ -172,8 +210,8 @@ func decodeTOML(data []byte, dest *Plugin) error {
 }
 
 // Validate checks p and rewrites launcher paths to cleaned absolute paths.
-// costs maps a check type to its cost. Checks must be non-decreasing in cost,
-// and process_running is required.
+// costs maps a check type to its cost. Checks must be non-decreasing in cost.
+// A service plug-in requires process_running first. A host plug-in uses host checks only.
 func Validate(p *Plugin, costs map[string]int) error {
 	if p == nil {
 		return fmt.Errorf("plug-in is nil")
@@ -187,7 +225,11 @@ func Validate(p *Plugin, costs map[string]int) error {
 	if p.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if p.Process.Match == "" || p.Process.Match == "." || p.Process.Match == "/" {
+	if p.Host {
+		if p.Process.Match != "" {
+			return fmt.Errorf("a host plug-in does not take a process match")
+		}
+	} else if p.Process.Match == "" || p.Process.Match == "." || p.Process.Match == "/" {
 		return fmt.Errorf("process match is required")
 	}
 	if len(p.Checks) == 0 {
@@ -203,6 +245,12 @@ func Validate(p *Plugin, costs map[string]int) error {
 			return fmt.Errorf("check %q is listed more than once", check.Type)
 		}
 		seenType[check.Type] = struct{}{}
+		if p.Host && !isHostCheck(check.Type) {
+			return fmt.Errorf("%s is not a host check", check.Type)
+		}
+		if !p.Host && isHostCheck(check.Type) {
+			return fmt.Errorf("%s is only valid on a host plug-in", check.Type)
+		}
 		cost, ok := costs[check.Type]
 		if !ok {
 			return fmt.Errorf("unknown check type %q", check.Type)
@@ -211,26 +259,20 @@ func Validate(p *Plugin, costs map[string]int) error {
 			return fmt.Errorf("checks must be ordered cheapest first: %s (cost %d) follows a more expensive check", check.Type, cost)
 		}
 		prevCost = cost
-		switch check.Type {
-		case CheckProcessRunning:
+		if err := validateCheck(&p.Checks[i]); err != nil {
+			return err
+		}
+		if check.Type == CheckProcessRunning {
 			sawProcess = true
-			if check.Port != 0 || check.Consecutive != 0 {
-				return fmt.Errorf("process_running does not take port or consecutive")
-			}
-		case CheckOutboundTCP:
-			if check.Port < 1 || check.Port > 65535 {
-				return fmt.Errorf("outbound_tcp port must be from 1 to 65535")
-			}
-			if check.Consecutive < 1 {
-				return fmt.Errorf("outbound_tcp consecutive must be at least 1")
-			}
 		}
 	}
-	if !sawProcess {
-		return fmt.Errorf("process_running is required and must be the first check")
-	}
-	if p.Checks[0].Type != CheckProcessRunning {
-		return fmt.Errorf("process_running must be the first check")
+	if !p.Host {
+		if !sawProcess {
+			return fmt.Errorf("process_running is required and must be the first check")
+		}
+		if p.Checks[0].Type != CheckProcessRunning {
+			return fmt.Errorf("process_running must be the first check")
+		}
 	}
 	if err := normalizeFixes(p); err != nil {
 		return err
@@ -241,14 +283,97 @@ func Validate(p *Plugin, costs map[string]int) error {
 // ValidateAll validates every plug-in.
 func ValidateAll(list []Plugin, costs map[string]int) error {
 	seen := map[string]struct{}{}
+	hosts := 0
 	for i := range list {
 		if _, ok := seen[list[i].ID]; ok {
 			return fmt.Errorf("duplicate plug-in id %q", list[i].ID)
 		}
 		seen[list[i].ID] = struct{}{}
+		if list[i].Host {
+			hosts++
+		}
 		if err := Validate(&list[i], costs); err != nil {
 			return fmt.Errorf("%s: %w", list[i].ID, err)
 		}
+	}
+	if hosts > 1 {
+		return fmt.Errorf("only one host plug-in is allowed")
+	}
+	return nil
+}
+
+func isHostCheck(typ string) bool {
+	switch typ {
+	case CheckSleep, CheckNetwork, CheckDisk, CheckMemory, CheckCPU:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateCheck(check *Check) error {
+	switch check.Type {
+	case CheckProcessRunning, CheckSleep, CheckNetwork:
+		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+			return fmt.Errorf("%s does not take extra settings", check.Type)
+		}
+	case CheckOutboundTCP:
+		if check.Port < 1 || check.Port > 65535 {
+			return fmt.Errorf("outbound_tcp port must be from 1 to 65535")
+		}
+		if check.Consecutive < 1 {
+			return fmt.Errorf("outbound_tcp consecutive must be at least 1")
+		}
+		if check.MinFreePercent != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+			return fmt.Errorf("outbound_tcp does not take disk, cpu, or memory settings")
+		}
+	case CheckDisk:
+		if check.MinFreePercent <= 0 || check.MinFreePercent > 100 {
+			return fmt.Errorf("disk_free min_free_percent must be above 0 and at most 100")
+		}
+		if check.Port != 0 || check.Consecutive != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+			return fmt.Errorf("disk_free only takes min_free_percent")
+		}
+	case CheckMemory:
+		if check.Level == "" {
+			check.Level = DefaultMemoryLevel
+		}
+		if check.Level != "warn" && check.Level != "critical" {
+			return fmt.Errorf("memory_pressure level must be warn or critical")
+		}
+		if err := fillDuration(check); err != nil {
+			return err
+		}
+		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.CPUPercent != 0 {
+			return fmt.Errorf("memory_pressure only takes level and duration")
+		}
+	case CheckCPU:
+		if check.CPUPercent == 0 {
+			check.CPUPercent = DefaultCPUPercent
+		}
+		if check.CPUPercent <= 0 || check.CPUPercent > 100 {
+			return fmt.Errorf("cpu_percent must be above 0 and at most 100")
+		}
+		if err := fillDuration(check); err != nil {
+			return err
+		}
+		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.Level != "" {
+			return fmt.Errorf("cpu only takes cpu_percent and duration")
+		}
+	}
+	return nil
+}
+
+func fillDuration(check *Check) error {
+	if check.Duration == "" {
+		check.Duration = DefaultDuration.String()
+	}
+	d, err := time.ParseDuration(check.Duration)
+	if err != nil {
+		return fmt.Errorf("duration: %w", err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("duration must be positive")
 	}
 	return nil
 }
@@ -262,13 +387,16 @@ func normalizeFixes(p *Plugin) error {
 		key = strings.TrimSpace(key)
 		fix.Kind = strings.TrimSpace(fix.Kind)
 		if _, ok := FixAllowlist[key]; !ok {
-			return fmt.Errorf("fix %q is not on the allowlist (restart, force-restart)", key)
+			return fmt.Errorf("fix %q is not on the allowlist (stop, restart, force-restart)", key)
 		}
 		if _, dup := cleaned[key]; dup {
 			return fmt.Errorf("fix %q is listed more than once", key)
 		}
 		if fix.Kind != key {
 			return fmt.Errorf("fix %q must use kind %q", key, key)
+		}
+		if key == FixStop && strings.TrimSpace(fix.Launcher) != "" {
+			return fmt.Errorf("stop does not take a launcher")
 		}
 		launcher, err := cleanLauncher(fix.Launcher)
 		if err != nil {

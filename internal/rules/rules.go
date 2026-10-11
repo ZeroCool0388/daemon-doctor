@@ -3,7 +3,6 @@
 package rules
 
 import (
-	"strings"
 	"time"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
@@ -14,12 +13,23 @@ const (
 	KindDown           = "down"
 	KindStuck          = "stuck"
 	KindKeepsHappening = "keeps_happening"
+	KindSleep          = "sleep"
+	KindWake           = "wake"
+	KindNetworkDown    = "network_down"
+	KindNetworkBack    = "network_back"
+	KindDiskLow        = "disk_low"
+	KindCPUHog         = "cpu_hog"
+	KindMemoryHog      = "memory_hog"
 
 	StatusOK      = "ok"
 	StatusWatch   = "watch"
 	StatusPending = "pending"
 	StatusDown    = "down"
 	StatusStuck   = "stuck"
+	StatusHeld    = "held"
+
+	// UnwatchedID is the service id used when a resource hog is not a watched plug-in.
+	UnwatchedID = "unwatched"
 
 	downStreakNeeded = 2
 	keepsLimit       = 3
@@ -35,6 +45,8 @@ type Alert struct {
 	Message     string
 	OfferFix    bool
 	Action      string
+	Actions     []string
+	Process     string
 	At          time.Time
 }
 
@@ -44,10 +56,11 @@ type Verdict struct {
 	Alerts []Alert
 }
 
-// Engine stores per-service streaks and recent failures.
+// Engine stores per-service streaks, recent failures, and host-rule state.
 type Engine struct {
 	now func() time.Time
 	svc map[string]*state
+	mac *machineState
 }
 
 type state struct {
@@ -140,18 +153,19 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 			}
 		}
 	}
-	return Verdict{
-		Status: status,
-		Alerts: []Alert{{
-			ServiceID:   p.ID,
-			ServiceName: p.Name,
-			Kind:        kind,
-			Message:     message(p, kind),
-			OfferFix:    offer,
-			Action:      action,
-			At:          now,
-		}},
+	alert := Alert{
+		ServiceID:   p.ID,
+		ServiceName: p.Name,
+		Kind:        kind,
+		Message:     message(p, kind),
+		OfferFix:    offer,
+		Action:      action,
+		At:          now,
 	}
+	if offer && action != "" {
+		alert.Actions = []string{action}
+	}
+	return Verdict{Status: status, Alerts: []Alert{alert}}
 }
 
 func (e *Engine) service(id string) *state {
@@ -199,23 +213,5 @@ func prune(times []time.Time, cutoff time.Time) []time.Time {
 }
 
 func message(p plugins.Plugin, kind string) string {
-	var msg string
-	switch kind {
-	case KindDown:
-		msg = p.Messages.Down
-		if msg == "" {
-			msg = "{name} has stopped. It is not running."
-		}
-	case KindStuck:
-		msg = p.Messages.Stuck
-		if msg == "" {
-			msg = "{name} is running but its health check is failing."
-		}
-	case KindKeepsHappening:
-		msg = p.Messages.KeepsHappening
-		if msg == "" {
-			msg = "{name} has failed 3 times in the last hour. Automatic fixes are paused."
-		}
-	}
-	return strings.ReplaceAll(msg, "{name}", p.Name)
+	return fill(templateFor(p.Messages, kind), map[string]string{"name": p.Name})
 }

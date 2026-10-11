@@ -45,10 +45,15 @@ type Registry struct {
 	byType map[string]Type
 }
 
-// NewRegistry returns the built-in process and outbound TCP checks.
+// NewRegistry returns the built-in process, host, and outbound TCP checks.
 func NewRegistry() *Registry {
 	r := &Registry{byType: map[string]Type{}}
 	r.mustRegister(processCheck{})
+	r.mustRegister(sleepCheck{})
+	r.mustRegister(networkCheck{})
+	r.mustRegister(diskCheck{})
+	r.mustRegister(memoryCheck{})
+	r.mustRegister(cpuCheck{})
 	r.mustRegister(outboundCheck{})
 	return r
 }
@@ -127,7 +132,8 @@ func (r *Runner) Run(p plugins.Plugin, snap sysprobe.Snapshot) ([]Outcome, error
 			oc.Type = spec.Type
 		}
 		out = append(out, oc)
-		if oc.Failed {
+		// Host plug-ins report a bad reading without stopping the later checks.
+		if oc.Failed && !p.Host {
 			failed = true
 		}
 	}

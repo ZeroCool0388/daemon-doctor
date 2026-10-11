@@ -1,0 +1,18 @@
+# Proton Mail Bridge. The public executable is often named bridge.
+# Change process.match if the install uses another name.
+id: proton-mail-bridge
+name: Proton Mail Bridge
+process:
+  match: bridge
+checks:
+  - type: process_running
+messages:
+  down: "Proton Mail Bridge has stopped. It is not running."
+  keeps_happening: "Proton Mail Bridge has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart

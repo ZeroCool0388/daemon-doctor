@@ -3,6 +3,8 @@
 package logbook
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +25,7 @@ type Event struct {
 	Message     string    `json:"message,omitempty"`
 	OfferFix    *bool     `json:"offer_fix,omitempty"`
 	Action      string    `json:"action,omitempty"`
+	Process     string    `json:"process,omitempty"`
 	DryRun      *bool     `json:"dry_run,omitempty"`
 	OK          *bool     `json:"ok,omitempty"`
 	Fixed       *bool     `json:"fixed,omitempty"`
@@ -57,6 +60,34 @@ func (b *Book) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.f.Close()
+}
+
+// Read returns every JSON line in path. A missing file is an empty log.
+func Read(path string) ([]Event, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read log: %w", err)
+	}
+	var out []Event
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var event Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, fmt.Errorf("read log: %w", err)
+		}
+		out = append(out, event)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read log: %w", err)
+	}
+	return out, nil
 }
 
 // Append writes one JSON line. It does not rewrite earlier lines.

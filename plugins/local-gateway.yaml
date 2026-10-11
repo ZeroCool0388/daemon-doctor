@@ -1,0 +1,18 @@
+# Generic local gateway. The launchd example is launchd/com.example.local-gateway.plist.
+# Change process.match if the executable name differs.
+id: local-gateway
+name: Local Gateway
+process:
+  match: local-gateway
+checks:
+  - type: process_running
+messages:
+  down: "Local Gateway has stopped. It is not running."
+  keeps_happening: "Local Gateway has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart

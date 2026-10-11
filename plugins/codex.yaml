@@ -1,0 +1,17 @@
+# Codex CLI or app. Change process.match if the executable name differs.
+id: codex
+name: Codex
+process:
+  match: codex
+checks:
+  - type: process_running
+messages:
+  down: "Codex has stopped. It is not running."
+  keeps_happening: "Codex has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart

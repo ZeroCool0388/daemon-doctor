@@ -1,0 +1,18 @@
+# Screen Sharing. The public macOS process is often named screensharingd.
+# Change process.match if the executable name differs.
+id: screen-sharing
+name: Screen Sharing
+process:
+  match: screensharingd
+checks:
+  - type: process_running
+messages:
+  down: "Screen Sharing has stopped. It is not running."
+  keeps_happening: "Screen Sharing has failed 3 times in the last hour. Automatic fixes are paused."
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+  force-restart:
+    kind: force-restart
