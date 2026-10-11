@@ -4,6 +4,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
@@ -68,33 +69,73 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 }
 
 // Cycle takes one sample, runs every plug-in, and logs checks and alerts.
+// While the network is down or the Mac is asleep, service checks are skipped
+// so their streaks stay where they were, and no service alert is raised.
 func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
 	snap, err := d.Source.Take(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]ServiceStatus, 0, len(d.Plugins))
+	host, hasHost := findHost(d.Plugins)
+	hold := hasHost && rules.HostHold(host, snap.Host)
+
+	type pending struct {
+		plugin   plugins.Plugin
+		outcomes []checks.Outcome
+	}
+	rows := make([]pending, 0, len(d.Plugins))
 	for _, p := range d.Plugins {
+		if hold && !p.Host {
+			rows = append(rows, pending{
+				plugin: p,
+				outcomes: []checks.Outcome{{
+					Type:    "paused",
+					Skipped: true,
+					Detail:  "paused while the network is down or the Mac is asleep",
+				}},
+			})
+			continue
+		}
 		outcomes, err := d.Checks.Run(p, snap)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", p.ID, err)
 		}
-		verdict := d.Rules.Decide(p, outcomes)
-		if err := d.logCheck(p, outcomes, verdict); err != nil {
+		rows = append(rows, pending{plugin: p, outcomes: outcomes})
+	}
+
+	samples := make([]rules.Sample, 0, len(rows))
+	for _, row := range rows {
+		samples = append(samples, rules.Sample{Plugin: row.plugin, Outcomes: row.outcomes})
+	}
+	machine := d.Rules.DecideMachine(d.now(), snap, samples)
+
+	out := make([]ServiceStatus, 0, len(rows))
+	for _, row := range rows {
+		st := ServiceStatus{ID: row.plugin.ID, Name: row.plugin.Name, Outcomes: row.outcomes}
+		switch {
+		case machine.Hold && row.plugin.Host:
+			st.Status = rules.StatusHeld
+			st.Alerts = machine.Alerts
+		case machine.Hold:
+			st.Status = rules.StatusHeld
+		default:
+			verdict := d.Rules.Decide(row.plugin, row.outcomes)
+			if row.plugin.Host {
+				verdict.Alerts = append(verdict.Alerts, machine.Alerts...)
+			}
+			st.Status = verdict.Status
+			st.Alerts = verdict.Alerts
+		}
+		verdict := rules.Verdict{Status: st.Status, Alerts: st.Alerts}
+		if err := d.logCheck(row.plugin, row.outcomes, verdict); err != nil {
 			return nil, err
 		}
-		for _, alert := range verdict.Alerts {
+		for _, alert := range st.Alerts {
 			if err := d.logAlert(alert); err != nil {
 				return nil, err
 			}
 		}
-		out = append(out, ServiceStatus{
-			ID:       p.ID,
-			Name:     p.Name,
-			Status:   verdict.Status,
-			Outcomes: outcomes,
-			Alerts:   verdict.Alerts,
-		})
+		out = append(out, st)
 	}
 	return out, nil
 }
@@ -165,9 +206,73 @@ func (d *Doctor) ApplyFix(ctx context.Context, serviceID, action string, dryRun 
 	return res, nil
 }
 
+// ApplyStop signals one unwatched process that a hog rule named.
+// It never launches a program.
+func (d *Doctor) ApplyStop(ctx context.Context, processName string, dryRun bool) (fixes.Result, error) {
+	processName = strings.TrimSpace(processName)
+	p := plugins.Plugin{ID: rules.UnwatchedID, Name: processName}
+	if err := fixes.ValidProcessName(processName); err != nil {
+		if logErr := d.logFix(p, plugins.FixStop, dryRun, fixes.Result{}, err); logErr != nil {
+			return fixes.Result{}, logErr
+		}
+		return fixes.Result{}, err
+	}
+	if !d.stopPermitted(processName) {
+		err := fmt.Errorf("stop is not approved for process %q", processName)
+		if logErr := d.logFix(p, plugins.FixStop, dryRun, fixes.Result{}, err); logErr != nil {
+			return fixes.Result{}, logErr
+		}
+		return fixes.Result{}, err
+	}
+	res, err := d.Fixes.ApplyStop(ctx, processName, dryRun)
+	if logErr := d.logFix(p, plugins.FixStop, dryRun, res, err); logErr != nil && err == nil {
+		err = logErr
+	}
+	return res, err
+}
+
+func (d *Doctor) stopPermitted(name string) bool {
+	if d.Rules.StopAllowed(name) {
+		return true
+	}
+	if d.Log == nil {
+		return false
+	}
+	events, err := logbook.Read(d.Log.Path())
+	if err != nil {
+		return false
+	}
+	var cpuName, memName string
+	var cpuOffer, memOffer bool
+	for _, event := range events {
+		if event.Kind != "alert" || event.ServiceID != rules.UnwatchedID {
+			continue
+		}
+		offered := event.OfferFix != nil && *event.OfferFix
+		switch event.AlertKind {
+		case rules.KindCPUHog:
+			cpuName = event.Process
+			cpuOffer = offered
+		case rules.KindMemoryHog:
+			memName = event.Process
+			memOffer = offered
+		}
+	}
+	return (cpuOffer && cpuName == name) || (memOffer && memName == name)
+}
+
 func (d *Doctor) find(id string) (plugins.Plugin, bool) {
 	for _, p := range d.Plugins {
 		if p.ID == id {
+			return p, true
+		}
+	}
+	return plugins.Plugin{}, false
+}
+
+func findHost(list []plugins.Plugin) (plugins.Plugin, bool) {
+	for _, p := range list {
+		if p.Host {
 			return p, true
 		}
 	}
@@ -195,6 +300,10 @@ func (d *Doctor) logAlert(a rules.Alert) error {
 		return nil
 	}
 	offer := a.OfferFix
+	action := a.Action
+	if len(a.Actions) > 1 {
+		action = strings.Join(a.Actions, " or ")
+	}
 	return d.Log.Append(logbook.Event{
 		Time:        a.At,
 		Kind:        "alert",
@@ -204,7 +313,8 @@ func (d *Doctor) logAlert(a rules.Alert) error {
 		AlertKind:   a.Kind,
 		Message:     a.Message,
 		OfferFix:    &offer,
-		Action:      a.Action,
+		Action:      action,
+		Process:     a.Process,
 	})
 }
 

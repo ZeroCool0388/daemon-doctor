@@ -11,18 +11,37 @@ import (
 
 // Process is one running process.
 type Process struct {
-	PID  int
-	PPID int
-	Name string // kernel command name
-	Exe  string // argv0, when known
-	Cmd  string // command line for display; checks match on Name and Exe
+	PID         int
+	PPID        int
+	Name        string // kernel command name
+	Exe         string // argv0, when known
+	Cmd         string // command line for display; checks match on Name and Exe
+	CPUKnown    bool
+	CPUPercent  float64 // share of the whole machine, 0 to 100
+	MemoryKnown bool
+	MemoryBytes int64
 }
 
-// Snapshot is one sample of processes and their established outbound TCP ports.
+// Host is machine-wide state for one sample.
+// A field is used only when its Known flag is set, so a fake snapshot
+// can leave a reading out.
+type Host struct {
+	SleepKnown          bool
+	Asleep              bool
+	NetworkKnown        bool
+	NetworkUp           bool
+	DiskKnown           bool
+	DiskFreePercent     float64
+	MemoryPressureKnown bool
+	MemoryPressure      string // normal, warn, or critical
+}
+
+// Snapshot is one sample of processes, connections, and host readings.
 // OutboundPorts maps a PID to the remote ports of its established outbound connections.
 type Snapshot struct {
 	Processes     []Process
 	OutboundPorts map[int][]int
+	Host          Host
 }
 
 // Source takes a sample. Live system calls sit behind this interface.
@@ -95,6 +114,7 @@ func clone(s Snapshot) Snapshot {
 	out := Snapshot{
 		Processes:     append([]Process(nil), s.Processes...),
 		OutboundPorts: make(map[int][]int, len(s.OutboundPorts)),
+		Host:          s.Host,
 	}
 	for pid, ports := range s.OutboundPorts {
 		out.OutboundPorts[pid] = append([]int(nil), ports...)

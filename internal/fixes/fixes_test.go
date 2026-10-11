@@ -135,6 +135,54 @@ func TestRestartAndForceRestartAreAllowlisted(t *testing.T) {
 	}
 }
 
+func TestStopDoesNotLaunch(t *testing.T) {
+	launch := "/opt/example-desktop-app-launch"
+	p := plugin(launch)
+	p.Fixes[plugins.FixStop] = plugins.Fix{Kind: plugins.FixStop, Launcher: launch}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree()}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err := runner.Apply(context.Background(), p, plugins.FixStop, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.launches) != 0 || res.Launched != "" {
+		t.Fatalf("stop launched: %+v launches %v", res, ctrl.launches)
+	}
+	if len(ctrl.sigs) != 2 || ctrl.sigs[0] != syscall.SIGTERM {
+		t.Fatalf("signals %v", ctrl.sigs)
+	}
+	if res.Fixed {
+		t.Fatal("process is still in the recheck snapshot")
+	}
+}
+
+func TestApplyStopMatchesTheExactName(t *testing.T) {
+	snap := sysprobe.Snapshot{Processes: []sysprobe.Process{
+		{PID: 4, PPID: 1, Name: "ExampleTool", Exe: "ExampleTool"},
+		{PID: 8, PPID: 1, Name: "ExampleToolbox", Exe: "ExampleToolbox"},
+	}}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{snap, sysprobe.Snapshot{}}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl}
+	res, err := runner.ApplyStop(context.Background(), "ExampleTool", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.pids) != 1 || ctrl.pids[0] != 4 || len(ctrl.launches) != 0 {
+		t.Fatalf("pids %v launches %v", ctrl.pids, ctrl.launches)
+	}
+	if !res.Fixed {
+		t.Fatalf("recheck should see it gone: %+v", res)
+	}
+	if _, err := runner.ApplyStop(context.Background(), "ExampleTool; rm", false); err == nil {
+		t.Fatal("metacharacters should be refused")
+	}
+	if len(ctrl.pids) != 1 {
+		t.Fatalf("refused name still signalled: %v", ctrl.pids)
+	}
+}
+
 func TestUnknownFixIsNotExecuted(t *testing.T) {
 	ctrl := &recordingCtrl{}
 	src := &sysprobe.MemSource{}

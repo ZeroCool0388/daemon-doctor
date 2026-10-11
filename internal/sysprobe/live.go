@@ -4,36 +4,167 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"sync"
+	"time"
 )
 
+const hostReadTimeout = 2 * time.Second
+
 // liveSource reads the machine this process is running on.
-type liveSource struct{}
+// It keeps the previous CPU sample so a percentage can be a delta.
+type liveSource struct {
+	mu   sync.Mutex
+	prev TickSample
+}
 
 // Live returns a Source backed by the local operating system.
-func Live() Source { return liveSource{} }
+func Live() Source { return &liveSource{} }
 
-func (liveSource) Take(ctx context.Context) (Snapshot, error) {
+func (s *liveSource) Take(ctx context.Context) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
 	switch runtime.GOOS {
 	case "linux":
-		return ReadProc("/proc")
+		snap, err := ReadProc("/proc")
+		if err != nil {
+			return Snapshot{}, err
+		}
+		s.annotateLinux(ctx, &snap)
+		return snap, nil
 	case "darwin":
-		return takeDarwin(ctx)
+		snap, err := takeDarwin(ctx)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		s.annotateDarwin(ctx, &snap)
+		return snap, nil
 	default:
 		return Snapshot{}, fmt.Errorf("unsupported operating system %s", runtime.GOOS)
 	}
 }
 
+func (s *liveSource) annotateLinux(ctx context.Context, snap *Snapshot) {
+	if data, err := os.ReadFile("/proc/net/route"); err == nil {
+		up, known := ParseProcNetRoute(string(data))
+		snap.Host.NetworkKnown = known
+		snap.Host.NetworkUp = up
+	}
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		level, known := ParseMeminfo(string(data))
+		snap.Host.MemoryPressureKnown = known
+		snap.Host.MemoryPressure = level
+	}
+	if out, ok := commandOutput(ctx, hostReadTimeout, "df", "-P", "/"); ok {
+		pct, known := ParseDF(out)
+		snap.Host.DiskKnown = known
+		snap.Host.DiskFreePercent = pct
+	}
+	cur, err := readLinuxTicks("/proc", snap.Processes)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	prev := s.prev
+	s.prev = cur
+	s.mu.Unlock()
+	snap.Processes = ApplyCPU(prev, cur, snap.Processes)
+}
+
+func (s *liveSource) annotateDarwin(ctx context.Context, snap *Snapshot) {
+	ncpu := runtime.NumCPU()
+	for i := range snap.Processes {
+		if snap.Processes[i].CPUKnown {
+			snap.Processes[i].CPUPercent = ScaleMachineCPU(snap.Processes[i].CPUPercent, ncpu)
+		}
+	}
+	if out, ok := commandOutput(ctx, hostReadTimeout, "route", "-n", "get", "default"); ok {
+		if out == "" {
+			snap.Host.NetworkKnown = true
+			snap.Host.NetworkUp = false
+		} else {
+			up, known := ParseRouteGet(out)
+			snap.Host.NetworkKnown = known
+			snap.Host.NetworkUp = up
+		}
+	}
+	if out, ok := commandOutput(ctx, hostReadTimeout, "df", "-P", "/"); ok {
+		pct, known := ParseDF(out)
+		snap.Host.DiskKnown = known
+		snap.Host.DiskFreePercent = pct
+	}
+	if out, ok := commandOutput(ctx, hostReadTimeout, "sysctl", "-n", "kern.memorystatus_vm_pressure_level"); ok {
+		if level, known := ParseVMPressure(out); known {
+			snap.Host.MemoryPressureKnown = true
+			snap.Host.MemoryPressure = level
+		}
+	}
+	if !snap.Host.MemoryPressureKnown {
+		if out, ok := commandOutput(ctx, hostReadTimeout, "memory_pressure"); ok {
+			if level, known := ParseMemoryPressureText(out); known {
+				snap.Host.MemoryPressureKnown = true
+				snap.Host.MemoryPressure = level
+			}
+		}
+	}
+	if out, ok := commandOutput(ctx, hostReadTimeout, "pmset", "-g", "log"); ok {
+		asleep, known := ParsePMSetLog(out)
+		snap.Host.SleepKnown = known
+		snap.Host.Asleep = asleep
+	}
+}
+
+func readLinuxTicks(root string, procs []Process) (TickSample, error) {
+	data, err := os.ReadFile(filepath.Join(root, "stat"))
+	if err != nil {
+		return TickSample{}, err
+	}
+	total, ok := ParseProcStatTotal(string(data))
+	if !ok {
+		return TickSample{}, fmt.Errorf("unrecognized %s", filepath.Join(root, "stat"))
+	}
+	sample := TickSample{Total: total, Proc: map[int]uint64{}}
+	for _, proc := range procs {
+		raw, err := os.ReadFile(filepath.Join(root, strconv.Itoa(proc.PID), "stat"))
+		if err != nil {
+			continue
+		}
+		ticks, ok := ParsePIDStatTicks(string(raw))
+		if !ok {
+			continue
+		}
+		sample.Proc[proc.PID] = ticks
+	}
+	return sample, nil
+}
+
+// commandOutput runs a short read-only command. ran is false when the program
+// cannot be started. A non-zero exit still returns whatever the program wrote.
+func commandOutput(ctx context.Context, timeout time.Duration, name string, args ...string) (string, bool) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, name, args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return string(out), true
+		}
+		return "", false
+	}
+	return string(out), true
+}
+
 func takeDarwin(ctx context.Context) (Snapshot, error) {
-	psOut, err := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "command=").Output()
+	psOut, err := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "%cpu=", "-o", "rss=", "-o", "command=").Output()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("ps: %w", err)
 	}
-	procs, err := ParsePS(string(psOut))
+	procs, err := ParsePSResource(string(psOut))
 	if err != nil {
 		return Snapshot{}, err
 	}

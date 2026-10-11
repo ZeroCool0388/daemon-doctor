@@ -54,11 +54,13 @@ func usage(w io.Writer) {
 Usage:
   daemon-doctor status [--config path]
   daemon-doctor run [--config path]
-  daemon-doctor fix --service id --action restart|force-restart [--dry-run] [--yes] [--config path]
+  daemon-doctor fix --service id --action stop|restart|force-restart [--dry-run] [--yes] [--config path]
+  daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
 
 status prints one check of each plug-in.
 run repeats checks on the configured interval until interrupted.
 fix applies one allowlisted action after you answer y, then rechecks.
+--process stop is only for a process named by an unwatched resource alert.
 --dry-run rechecks without signalling a process or launching anything.
 
 The default config path is ~/.config/daemon-doctor/config.yaml.
@@ -119,7 +121,8 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to config.yaml")
 	service := fs.String("service", "", "plug-in id")
-	action := fs.String("action", "", "restart or force-restart")
+	processName := fs.String("process", "", "process name for an unwatched stop")
+	action := fs.String("action", "", "stop, restart, or force-restart")
 	dryRun := fs.Bool("dry-run", false, "recheck without applying the fix")
 	yes := fs.Bool("yes", false, "apply the fix without a prompt")
 	if err := fs.Parse(args); err != nil {
@@ -133,6 +136,17 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+	if *processName != "" && *service != "" {
+		fmt.Fprintln(stderr, "fix takes either --service or --process")
+		return 2
+	}
+	if *processName != "" {
+		if *action != plugins.FixStop {
+			fmt.Fprintln(stderr, "fix --process only allows --action stop")
+			return 2
+		}
+		return fixProcess(path, *processName, *dryRun, *yes, stdin, stdout, stderr)
 	}
 	if *service == "" || *action == "" {
 		fmt.Fprintln(stderr, "fix needs --service and --action")
@@ -184,6 +198,51 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	res, err := d.ApplyFix(context.Background(), *service, *action, *dryRun)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, res.Message)
+	if res.Detail != "" {
+		fmt.Fprintln(stdout, res.Detail)
+	}
+	return 0
+}
+
+func fixProcess(path, processName string, dryRun, yes bool, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := fixes.ValidProcessName(processName); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	ps, err := plugins.LoadDir(cfg.PluginsDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if !dryRun && !yes {
+		fmt.Fprintf(stderr, "Apply stop to %s? [y/N] ", processName)
+		if !confirmed(stdin) {
+			fmt.Fprintln(stdout, "Fix not run.")
+			return 0
+		}
+	}
+	book, err := logbook.Open(cfg.LogPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer book.Close()
+	d, err := doctor.New(ps, sysprobe.Live(), fixes.OSController{}, book, checks.NewRegistry(), time.Now)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	res, err := d.ApplyStop(context.Background(), processName, dryRun)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -285,12 +344,29 @@ func formatStatus(st doctor.ServiceStatus) string {
 	for _, alert := range st.Alerts {
 		fmt.Fprintf(&b, "  alert: %s\n", alert.Message)
 		if alert.OfferFix {
-			fmt.Fprintf(&b, "  fix offered: %s\n", alert.Action)
+			fmt.Fprintf(&b, "  fix offered: %s\n", offerText(st.ID, alert))
 		} else {
 			fmt.Fprintf(&b, "  fix offered: none\n")
 		}
 	}
 	return b.String()
+}
+
+func offerText(rowID string, alert rules.Alert) string {
+	if alert.ServiceID == rules.UnwatchedID && alert.Process != "" {
+		return "stop --process " + alert.Process
+	}
+	action := alert.Action
+	if len(alert.Actions) > 1 {
+		action = strings.Join(alert.Actions, " or ")
+	}
+	if action == "" {
+		return "none"
+	}
+	if alert.ServiceID != "" && alert.ServiceID != rowID {
+		return action + " --service " + alert.ServiceID
+	}
+	return action
 }
 
 func statusText(status string) string {
@@ -305,6 +381,8 @@ func statusText(status string) string {
 		return "down"
 	case rules.StatusStuck:
 		return "running but stuck"
+	case rules.StatusHeld:
+		return "paused"
 	default:
 		return status
 	}

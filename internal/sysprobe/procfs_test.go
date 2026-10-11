@@ -68,9 +68,27 @@ func TestLiveLinuxIncludesThisProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("live procfs sample runs on linux")
 	}
-	snap, err := Live().Take(context.Background())
+	src := Live()
+	snap, err := src.Take(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snap.Host.SleepKnown {
+		t.Fatal("linux has no sleep reading in this build")
+	}
+	for _, proc := range snap.Processes {
+		if proc.CPUKnown {
+			t.Fatalf("first cpu sample should have no percentage: pid %d", proc.PID)
+		}
+	}
+	second, err := src.Take(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, proc := range second.Processes {
+		if proc.CPUKnown && (proc.CPUPercent < 0 || proc.CPUPercent > 100) {
+			t.Fatalf("cpu percent %v on pid %d", proc.CPUPercent, proc.PID)
+		}
 	}
 	self := os.Getpid()
 	for _, proc := range snap.Processes {

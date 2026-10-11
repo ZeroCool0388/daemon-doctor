@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +182,130 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not stop")
+	}
+}
+
+func TestNetworkDownPausesServiceChecks(t *testing.T) {
+	host := plugins.Plugin{
+		ID:   "this-mac",
+		Name: "This Mac",
+		Host: true,
+		Checks: []plugins.Check{
+			{Type: plugins.CheckSleep},
+			{Type: plugins.CheckNetwork},
+			{Type: plugins.CheckDisk, MinFreePercent: 10},
+		},
+	}
+	service := loadExample(t)
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host, service}, src, nil, nil, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := running(0)
+	up.Host = sysprobe.Host{SleepKnown: true, NetworkKnown: true, NetworkUp: true, DiskKnown: true, DiskFreePercent: 40}
+	src.Set(up)
+	rows, err := d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[1].Status != rules.StatusWatch || len(rows[1].Alerts) != 0 {
+		t.Fatalf("first miss: %+v", rows[1])
+	}
+
+	down := up
+	down.Host.NetworkUp = false
+	src.Set(down)
+	for i := 0; i < 2; i++ {
+		rows, err = d.Cycle(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rows[0].Status != rules.StatusHeld || rows[1].Status != rules.StatusHeld {
+			t.Fatalf("held: %+v %+v", rows[0].Status, rows[1].Status)
+		}
+		if len(rows[1].Alerts) != 0 {
+			t.Fatalf("service alert while paused: %+v", rows[1].Alerts)
+		}
+	}
+	if len(rows[0].Alerts) != 0 {
+		t.Fatalf("repeat network alert: %+v", rows[0].Alerts)
+	}
+
+	src.Set(up)
+	rows, err = d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[1].Status != rules.StatusWatch {
+		t.Fatalf("streak should still be short: %+v", rows[1])
+	}
+	var summary string
+	for _, alert := range rows[0].Alerts {
+		if alert.Kind == rules.KindNetworkBack {
+			summary = alert.Message
+		}
+	}
+	if summary == "" || !bytes.Contains([]byte(summary), []byte("services look healthy")) {
+		t.Fatalf("summary: %q alerts %+v", summary, rows[0].Alerts)
+	}
+	rows, err = d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[1].Status != rules.StatusStuck || len(rows[1].Alerts) != 1 {
+		t.Fatalf("third running sample should be stuck: %+v", rows[1])
+	}
+}
+
+func TestUnwatchedStopIsLimitedToTheNamedProcess(t *testing.T) {
+	host := plugins.Plugin{
+		ID:   "this-mac",
+		Name: "This Mac",
+		Host: true,
+		Checks: []plugins.Check{
+			{Type: plugins.CheckNetwork},
+			{Type: plugins.CheckCPU, CPUPercent: 85, Duration: "5m"},
+		},
+	}
+	service := loadExample(t)
+	src := &sysprobe.MemSource{}
+	clock := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host, service}, src, nil, nil, nil, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := running(1)
+	snap.Host = sysprobe.Host{NetworkKnown: true, NetworkUp: true}
+	snap.Processes = append(snap.Processes, sysprobe.Process{PID: 9, PPID: 1, Name: "ExampleTool", CPUKnown: true, CPUPercent: 95})
+	src.Set(snap)
+	if _, err := d.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(5 * time.Minute)
+	rows, err := d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, alert := range rows[0].Alerts {
+		if alert.Kind == rules.KindCPUHog && alert.Process == "ExampleTool" && alert.OfferFix {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("alerts: %+v", rows[0].Alerts)
+	}
+	if _, err := d.ApplyStop(context.Background(), "other-tool", true); err == nil {
+		t.Fatal("unnamed process should be refused")
+	}
+	res, err := d.ApplyStop(context.Background(), "ExampleTool", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Message, "Dry run") {
+		t.Fatalf("message %q", res.Message)
 	}
 }
 

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example LaunchAgent for a local gateway service. Replace the placeholder
+  path, then load it with launchctl as the normal user. It is not meant
+  to run as root.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.example.local-gateway</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/path/to/local-gateway</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+</dict>
+</plist>

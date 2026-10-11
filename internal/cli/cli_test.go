@@ -108,3 +108,45 @@ func TestUsage(t *testing.T) {
 		t.Fatalf("stdout: %s", stdout.String())
 	}
 }
+
+func TestUnwatchedStopFlag(t *testing.T) {
+	path := writeFixture(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"daemon-doctor", "fix", "--config", path, "--service", "example-desktop-app", "--process", "ExampleTool", "--action", "stop"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--process", "ExampleTool", "--action", "restart"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+
+	logPath := filepath.Join(filepath.Dir(path), "events.jsonl")
+	line := []byte("{\"time\":\"2026-01-02T21:00:00Z\",\"kind\":\"alert\",\"service_id\":\"unwatched\",\"alert_kind\":\"cpu_hog\",\"message\":\"A process that is not on the watched list (ExampleTool) has used 90% of the CPU for 5 minutes.\",\"offer_fix\":true,\"action\":\"stop\",\"process\":\"ExampleTool\"}\n")
+	if err := os.WriteFile(logPath, line, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--process", "ExampleTool;rm", "--action", "stop", "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("stdout %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--process", "other-tool", "--action", "stop", "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "not approved") {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--process", "ExampleTool", "--action", "stop", "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Dry run") {
+		t.Fatalf("stdout %s", stdout.String())
+	}
+}

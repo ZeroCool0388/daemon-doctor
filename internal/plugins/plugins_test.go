@@ -130,3 +130,83 @@ func TestApprovedOnlyAllowlist(t *testing.T) {
 		t.Fatal("a smuggled command must not be approved")
 	}
 }
+
+func TestLoadStarterPlugins(t *testing.T) {
+	list, err := LoadDir(filepath.Join("..", "..", "plugins"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	hosts := 0
+	for _, p := range list {
+		ids = append(ids, p.ID)
+		if p.Host {
+			hosts++
+		}
+		if !p.Host && !Approved(p, FixStop) && p.ID != "example-desktop-app" {
+			t.Fatalf("%s should approve stop", p.ID)
+		}
+	}
+	want := []string{
+		"ai-desktop-app", "chatgpt", "codex", "example-desktop-app",
+		"local-gateway", "proton-mail-bridge", "screen-sharing", "syncthing", "this-mac",
+	}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("ids %v", ids)
+	}
+	if hosts != 1 {
+		t.Fatalf("hosts %d", hosts)
+	}
+	mac := list[len(list)-1]
+	if mac.ID != "this-mac" || mac.Process.Match != "" || mac.Checks[2].MinFreePercent != 10 || mac.Checks[4].CPUPercent != 85 {
+		t.Fatalf("this-mac: %+v", mac)
+	}
+	if mac.Messages.NetworkDown == "" || mac.Messages.CPUHogUnwatched == "" || mac.Messages.MemoryHog == "" {
+		t.Fatalf("messages: %+v", mac.Messages)
+	}
+}
+
+func TestHostPluginValidation(t *testing.T) {
+	host := Plugin{
+		ID:   "this-mac",
+		Name: "This Mac",
+		Host: true,
+		Checks: []Check{
+			{Type: CheckSleep},
+			{Type: CheckDisk, MinFreePercent: 10},
+			{Type: CheckCPU, CPUPercent: 85, Duration: "5m"},
+		},
+	}
+	if err := Validate(&host, BuiltinCosts()); err != nil {
+		t.Fatal(err)
+	}
+	withProcess := host
+	withProcess.Process.Match = "this-mac"
+	if err := Validate(&withProcess, BuiltinCosts()); err == nil {
+		t.Fatal("host plug-in should reject a process match")
+	}
+	service := Plugin{
+		ID:      "example-desktop-app",
+		Name:    "Example",
+		Process: ProcessMatch{Match: "example-desktop-app"},
+		Checks:  []Check{{Type: CheckProcessRunning}, {Type: CheckCPU}},
+	}
+	if err := Validate(&service, BuiltinCosts()); err == nil {
+		t.Fatal("service plug-in should reject a host check")
+	}
+	second := host
+	second.ID = "other-mac"
+	if err := ValidateAll([]Plugin{host, second}, BuiltinCosts()); err == nil || !strings.Contains(err.Error(), "one host") {
+		t.Fatalf("two hosts: %v", err)
+	}
+	stop := Plugin{
+		ID:      "example-desktop-app",
+		Name:    "Example",
+		Process: ProcessMatch{Match: "example-desktop-app"},
+		Checks:  []Check{{Type: CheckProcessRunning}},
+		Fixes:   map[string]Fix{FixStop: {Kind: FixStop, Launcher: "/opt/example-launch"}},
+	}
+	if err := Validate(&stop, BuiltinCosts()); err == nil || !strings.Contains(err.Error(), "launcher") {
+		t.Fatalf("stop launcher: %v", err)
+	}
+}
