@@ -20,7 +20,10 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
+	"github.com/ZeroCool0388/daemon-doctor/internal/push"
+	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
+	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
 )
 
@@ -41,6 +44,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runCmd(args[2:], stdout, stderr)
 	case "fix":
 		return fixCmd(args[2:], stdin, stdout, stderr)
+	case "pair":
+		return pairCmd(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[1])
 		usage(stderr)
@@ -54,12 +59,16 @@ func usage(w io.Writer) {
 Usage:
   daemon-doctor status [--config path]
   daemon-doctor run [--config path]
+  daemon-doctor pair [--list] [--config path]
   daemon-doctor fix --service id --action stop|restart|force-restart [--dry-run] [--yes] [--config path]
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
+  daemon-doctor fix --approval file [--dry-run] [--config path]
 
 status prints one check of each plug-in.
 run repeats checks on the configured interval until interrupted.
+pair prints a one-time pairing payload and a terminal QR. The private key stays in the state directory.
 fix applies one allowlisted action after you answer y, then rechecks.
+fix --approval reads a signed phone approval. The signature is the approval.
 --process stop is only for a process named by an unwatched resource alert.
 --dry-run rechecks without signalling a process or launching anything.
 
@@ -125,6 +134,7 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	action := fs.String("action", "", "stop, restart, or force-restart")
 	dryRun := fs.Bool("dry-run", false, "recheck without applying the fix")
 	yes := fs.Bool("yes", false, "apply the fix without a prompt")
+	approvalPath := fs.String("approval", "", "path to a signed approval")
 	if err := fs.Parse(args); err != nil {
 		return flagCode(err)
 	}
@@ -136,6 +146,13 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+	if *approvalPath != "" {
+		if *service != "" || *processName != "" || *action != "" {
+			fmt.Fprintln(stderr, "fix --approval does not take --service, --process, or --action")
+			return 2
+		}
+		return fixApproval(path, *approvalPath, *dryRun, stdout, stderr)
 	}
 	if *processName != "" && *service != "" {
 		fmt.Fprintln(stderr, "fix takes either --service or --process")
@@ -254,6 +271,141 @@ func fixProcess(path, processName string, dryRun, yes bool, stdin io.Reader, std
 	return 0
 }
 
+func fixApproval(path, approvalPath string, dryRun bool, stdout, stderr io.Writer) int {
+	raw, err := os.ReadFile(approvalPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	d, book, cfg, err := openDoctor(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer book.Close()
+	sec, err := security.Open(cfg.StateDir)
+	if err != nil {
+		fmt.Fprintln(stderr, "error: pair first")
+		return 1
+	}
+	var client *relay.Client
+	if cfg.RelayURL != "" {
+		client, err = relay.New(cfg.RelayURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+	d.UseRelay(sec, client, push.Stub{})
+	res, err := d.ApplyApproval(context.Background(), raw, dryRun)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, res.Message)
+	if res.Detail != "" {
+		fmt.Fprintln(stdout, res.Detail)
+	}
+	return 0
+}
+
+func pairCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to config.yaml")
+	list := fs.Bool("list", false, "print paired phone fingerprints")
+	if err := fs.Parse(args); err != nil {
+		return flagCode(err)
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	path, err := resolveConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if *list {
+		sec, err := security.Open(cfg.StateDir)
+		if err != nil {
+			fmt.Fprintln(stderr, "error: pair first")
+			return 1
+		}
+		for _, phone := range sec.Phones() {
+			fmt.Fprintln(stdout, security.Fingerprint(phone))
+		}
+		return 0
+	}
+	sec, err := security.LoadOrCreate(cfg.StateDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	payload, err := sec.BeginPairing(time.Now(), cfg.RelayURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "payload %s\n", payload)
+	qr, err := security.QR(payload)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, qr)
+	if cfg.RelayURL == "" {
+		return 0
+	}
+	client, err := relay.New(cfg.RelayURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	deadline := time.Now().Add(security.PairingTTL)
+	for {
+		if !time.Now().Before(deadline) {
+			fmt.Fprintln(stderr, "error: pairing code expired")
+			return 1
+		}
+		events, err := client.Poll(ctx, sec.MacID(), "pairing")
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0
+			}
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		for _, event := range events {
+			code, key, err := security.UnmarshalPairing(event.Body)
+			if err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				continue
+			}
+			if err := sec.AcceptPairing(time.Now(), code, key); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(stdout, "paired %s\n", security.Fingerprint(key))
+			return 0
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0
+		case <-timer.C:
+		}
+	}
+}
+
 func configFlag(name string, args []string, stderr io.Writer) (string, int, bool) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -330,7 +482,32 @@ func openDoctor(path string) (*doctor.Doctor, *logbook.Book, config.Config, erro
 		book.Close()
 		return nil, nil, config.Config{}, err
 	}
+	if err := attachRelay(d, cfg); err != nil {
+		book.Close()
+		return nil, nil, config.Config{}, err
+	}
 	return d, book, cfg, nil
+}
+
+func attachRelay(d *doctor.Doctor, cfg config.Config) error {
+	if cfg.RelayURL == "" {
+		sec, err := security.Open(cfg.StateDir)
+		if err != nil {
+			return nil
+		}
+		d.UseRelay(sec, nil, nil)
+		return nil
+	}
+	sec, err := security.Open(cfg.StateDir)
+	if err != nil {
+		return fmt.Errorf("pair first")
+	}
+	client, err := relay.New(cfg.RelayURL)
+	if err != nil {
+		return err
+	}
+	d.UseRelay(sec, client, push.Stub{})
+	return nil
 }
 
 func formatStatus(st doctor.ServiceStatus) string {

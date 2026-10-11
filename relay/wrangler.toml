@@ -1,0 +1,13 @@
+# Placeholder for local tests. Do not put an account id or an API token here.
+name = "daemon-doctor-relay"
+main = "src/index.ts"
+compatibility_date = "2026-01-15"
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "MAILBOX"
+class_name = "Mailbox"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Mailbox"]

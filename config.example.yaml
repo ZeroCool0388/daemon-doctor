@@ -1,5 +1,6 @@
 # Placeholder config. Copy to ~/.config/daemon-doctor/config.yaml.
-# No keys, relay URLs, or account data belong here.
+# No keys or account data belong here. Leave relay_url unset to stay local.
+# relay_url: https://relay.example.invalid
 plugins_dir: plugins
 log_path: /tmp/daemon-doctor/events.jsonl
 interval: 30s

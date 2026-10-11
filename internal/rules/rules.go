@@ -39,6 +39,7 @@ const (
 // Alert is one plain-English notice. OfferFix is false when no allowlisted
 // fix should be offered, including after the keeps-happening rule.
 type Alert struct {
+	ID          string
 	ServiceID   string
 	ServiceName string
 	Kind        string
