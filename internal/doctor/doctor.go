@@ -450,12 +450,13 @@ func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 	}
 	if d.relay != nil && d.sec != nil {
 		body := map[string]any{
-			"alert_id":   a.ID,
-			"service_id": a.ServiceID,
-			"kind":       a.Kind,
-			"message":    a.Message,
-			"actions":    actions,
-			"process":    a.Process,
+			"alert_id":     a.ID,
+			"service_id":   a.ServiceID,
+			"service_name": a.ServiceName,
+			"kind":         a.Kind,
+			"message":      a.Message,
+			"actions":      actions,
+			"process":      a.Process,
 		}
 		if err := d.relay.Post(ctx, d.sec.MacID(), "alerts", body); err != nil {
 			_ = d.logNote(err.Error())

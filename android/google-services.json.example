@@ -1,0 +1,23 @@
+{
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "daemon-doctor-example",
+    "storage_bucket": "daemon-doctor-example.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "android_client_info": {
+          "package_name": "dev.daemondoctor"
+        }
+      },
+      "api_key": [
+        {
+          "current_key": "placeholder-not-a-real-key"
+        }
+      ]
+    }
+  ],
+  "configuration_version": "1"
+}

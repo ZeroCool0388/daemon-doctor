@@ -2,7 +2,7 @@
 
 Watches the apps and background services on a Mac, spots when one is down, stuck, or using the machine, explains it in plain English, and fixes it only after you approve. Fixed rules only: no AI in the decision or fix path.
 
-**Status:** Phase 3 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
+**Status:** Phase 4 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
 
 ## Problem
 
@@ -16,13 +16,19 @@ Someone who keeps helper apps running on a Mac and wants a local notice when one
 
 _TBD (demo GIF)._
 
+The Android app starts in demo mode with fictional alerts and does not call a relay. A GIF of that screen is not in the repo.
+
 ## Live demo or replay
 
 _TBD (scripted replay)._
 
 ## Architecture
 
-The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed. Push to a phone is an interface with a no-network stub and no keys.
+The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed. The Mac push hook is an interface with a no-network stub and no keys.
+
+`android/` is a Kotlin and Jetpack Compose app. It pairs by reading the Mac's QR payload with CameraX and the on-device ML Kit barcode scanner, or by pasting that text when there is no camera. It generates an Ed25519 key in the Android Keystore when that algorithm is available, and otherwise keeps a 32-byte seed in the app's private files. It registers the public key with the relay. Alerts, a status row per service, and alert history are on screen. Fix it, Stop, Ignore, and Details use the allowlist the Mac already offered. Fix it prefers `restart`, then `force-restart`. Stop is offered only when the alert includes `stop`. Ignore stays on the phone. A signed approval is posted only when demo mode is off. The signed text matches the Mac verifier: `daemon-doctor/approval/v1`, then `mac_id`, `alert_id`, `fix_id`, `nonce`, and `expires_unix`. `testdata/approval-vectors.json` holds one fixture produced by Go and one produced by the JDK. Go re-signs its own fixture and only verifies the JDK fixture. The Kotlin tests re-sign both.
+
+Firebase Cloud Messaging is behind `PushHub`. The app polls the mailbox every 15 seconds while the process is running. That interval is the value in the app. `google-services.json` is gitignored. `android/google-services.json.example` is a placeholder. The debug APK builds without that file. Demo mode is the default and uses fictional alerts, so the APK does not need a relay.
 
 ```mermaid
 flowchart LR
@@ -36,6 +42,8 @@ flowchart LR
   end
   R -- outbound --> W[Relay mailbox]
   W -- stored approval --> V
+  Ph[Android app] -- signed approval --> W
+  W -- alert page --> Ph
 ```
 
 Plug-ins are YAML or TOML files. A service plug-in names a process, lists checks cheapest first, stores plain-English messages, and approves `stop`, `restart`, or `force-restart`. `plugins/this-mac.yaml` is the host plug-in: sleep or wake, network, free disk space, memory pressure, and CPU. It does not name a process and it has no fixes. The other shipped plug-ins are a generic AI desktop app, Codex, ChatGPT, a local gateway, Proton Mail Bridge, Syncthing, Screen Sharing, and the fictional `example-desktop-app`. Process names are the `process.match` field in each file.
@@ -83,29 +91,31 @@ Measured on Linux with Go 1.25.14 (`go version go1.25.14 linux/amd64`).
 
 ```
 ?   	github.com/ZeroCool0388/daemon-doctor/cmd/daemon-doctor	[no test files]
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.013s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.107s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/config	0.009s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.172s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.018s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.014s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.007s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.009s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.094s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/config	0.004s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.135s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.014s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.013s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.003s
 ?   	github.com/ZeroCool0388/daemon-doctor/internal/push	[no test files]
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.006s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.006s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/security	0.009s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.013s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.004s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.002s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/security	0.006s
+ok  	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.016s
 ```
 
-A following `go test -count=1 -json ./...` emitted 106 pass events that include a test name. 24 of those names are subtests. The package times above are from the first command. They are not a latency target.
+A following `go test -count=1 -json ./...` emitted 109 pass events that include a test name. 26 of those names are subtests. The package times above are from the first command. They are not a latency target.
 
-A separate `npm test` in `relay/` (Vitest 4.1.11) reported 8 passed tests. Vitest printed a duration of 1.53s for that run. That figure is the test runner's own total, not a relay latency.
+A separate `npm test` in `relay/` (Vitest 4.1.11) reported 8 passed tests. Vitest printed a duration of 1.27s for that run. That figure is the test runner's own total, not a relay latency.
+
+On the same machine, with the Gradle daemon already running and dependencies already downloaded, `./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks` in `android/` printed `BUILD SUCCESSFUL in 7s`. The shell `time` for that command was 7.426s real. JUnit XML from that run lists 10 tests, 0 failures, 0 errors, and 0 skipped: 9 in `:core` and 1 in `:app`. The debug APK at `android/app/build/outputs/apk/debug/app-debug.apk` was 36826116 bytes. Camera scanning and the Android Keystore were not run on a device.
 
 ## Cost and latency
 
 Not measured.
 
-The worker is not deployed, and the push hook does not call a network. Failure-to-alert time and tap-to-fixed time are not measured. The program's own CPU and memory use is not measured.
+The worker is not deployed, and the Mac push hook does not call a network. Failure-to-alert time and tap-to-fixed time are not measured. The program's own CPU and memory use is not measured. The phone checks the mailbox every 15 seconds while its process is running. That number is the interval written in the app.
 
 ## Limits and next steps
 
@@ -119,10 +129,12 @@ The worker is not deployed, and the push hook does not call a network. Failure-t
 - A local `y` still approves a fix typed on this machine. A phone approval is a separate signed message.
 - The relay sees the one-time pairing code when the phone registers. A hostile relay can substitute a phone key on that first registration. After a key is stored, the Mac rejects forged, replayed, expired, altered, and unknown-key approvals without running a fix.
 - Alert text is not encrypted. The mailbox can read the short alert it stores.
-- The phone app is not built. Push delivery is a stub.
-- Demo mode is not built.
+- The phone keeps its paired Mac id in app-private preferences. The one-time pairing code is stored with that payload. The private key is not.
+- Camera scanning and Android Keystore signing were not run on a device. The unit tests use the software signer. `selectBackend` chooses the keystore path only when Ed25519 key generation succeeds; any failure uses the app-private seed.
+- Without `google-services.json`, Firebase is not configured and the app relies on polling while its process is running. A push does not arrive in that build.
+- The Mac's scripted demo mode is not built. The GIF is not recorded. The Android demo mode is covered by JVM unit tests. This environment did not open the screens on a device.
 
-Next is the Android app, then demo mode.
+Next is the Mac demo mode and a recorded GIF.
 
 ## License
 
