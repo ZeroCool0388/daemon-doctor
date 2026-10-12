@@ -1,239 +1,219 @@
 # Daemon Doctor
 
-Watches the apps and background services on a Mac, spots when one is down, stuck, or using the machine, explains it in plain English, and fixes it only after you approve. Detection and fixes use fixed rules.
+[![CI](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml)
 
-**Status:** Phase 5 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
+**A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and runs a locally allowlisted fix after a signed phone approval or local confirmation.
 
-## Problem
+Fixed rules, one Go binary, one plug-in file per service. The Mac runs as the normal user and connects outward to a relay mailbox; it opens no inbound ports.
 
-An always-on Mac running helper apps can fail quietly. A process can still be running after it has stopped making progress, or one process can sit on the CPU or memory. Daemon Doctor checks on a timer, writes a local log, and says what it found in plain English.
+## The problem
+
+A helper app can still be running after it stops making progress. A sync tool, mail bridge or scheduled job can fail quietly. Daemon Doctor checks processes, connections, file ages and host readings, then offers the action configured for that service.
 
 ## Who it's for
 
-Someone who keeps helper apps running on a Mac and wants a local notice when one of them is down, stuck, or holding the machine, with fixes limited to an allowlist in that app's plug-in file. A paired phone can approve one of those fixes. The Mac checks the signature itself.
+People who keep background services running on a Mac and want phone alerts, explicit approval before a fix, and a local record of what happened.
 
 ## Demo
 
-A GIF is not in this repo.
+The [terminal recording](docs/demo.cast) shows `daemon-doctor demo`. Play it with `asciinema play docs/demo.cast`, or run the replay from a checkout:
 
-The terminal recording is [docs/demo.cast](docs/demo.cast). It was made with asciinema 2.4.0 by running the built `daemon-doctor demo` command. Play it with `asciinema play docs/demo.cast`. The cast is that command's stdout. It is not a screen recording of the Android app.
-
-## Live demo or replay
-
-`daemon-doctor demo` replays four scripted incidents with fake services. It does not read the host, open a relay, or use a phone. The incidents are an app that is stuck and then force-restarted, a network drop and recovery that names only the service that stayed down, a CPU hog that is stopped, and a service that fails three times so fixes are no longer offered.
-
-```
+```sh
 go build -o daemon-doctor ./cmd/daemon-doctor
 ./daemon-doctor demo
 ```
 
-No config file is required. The clock in the script jumps forward so the 5-minute CPU rule finishes without waiting.
+Its first scene includes:
+
+```text
+Scene 1. Example Desktop App is stuck, then force-restarted.
+12:04 UTC  alert: Example Desktop App is open but has no established outbound connection on port 443, so it looks stuck.
+12:04 UTC  fix offered: force-restart
+12:04 UTC  outcome: Fixed. Example Desktop App looks healthy on recheck.
+```
+
+The replay also covers network recovery, an unwatched CPU hog and repeated failures. It uses fictional services and a scripted clock, with no accounts, keys, config or network. The Android app also starts in demo mode.
 
 ## Architecture
 
-The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed from this repo. The Mac posts alerts to `/v1/macs/{mac_id}/alerts`, polls `/pairing` and `/approvals` with `?after={event_id}&limit=100`, and posts fix outcomes to `/results`. Polls run every five seconds independently of the check interval. Pages contain at most 100 records, so a backlog can be replayed after a restart. Polling has a shared 750 ms budget per intake. Alert and result posts have 250 ms deadlines; each intake retries at most one queued delivery after approval polling. Failed retries move to the back of the queue; the retry queue is not retained across restarts. The relay's phone push hook remains a stub; stored alerts are available to the Android poller.
-
-`android/` is a Kotlin and Jetpack Compose app. It pairs by reading the Mac's QR payload with CameraX and the on-device ML Kit barcode scanner, or by pasting that text when there is no camera. It generates an Ed25519 key in the Android Keystore when that algorithm is available, and otherwise keeps a 32-byte seed in the app's private files. It registers the public key with the relay. Alerts, a status row per service, and alert history are on screen. Fix it, Stop, Ignore, and Details use the allowlist the Mac already offered. Fix it prefers `restart`, then `force-restart`, then `launchctl_kickstart`. Stop is offered only when the alert includes `stop`. Ignore stays on the phone. A signed approval is posted only when demo mode is off. The signed text matches the Mac verifier: `daemon-doctor/approval/v1`, then `mac_id`, `alert_id`, `fix_id`, `nonce`, and `expires_unix`. `testdata/approval-vectors.json` holds one fixture produced by Go and one produced by the JDK. Go re-signs its own fixture and only verifies the JDK fixture. The Kotlin tests re-sign both.
-
-Firebase Cloud Messaging is behind `PushHub`. The app polls the mailbox every 15 seconds while the process is running. That interval is the value in the app. `google-services.json` is gitignored. `android/google-services.json.example` is a placeholder. The debug APK builds without that file. Demo mode is the default and uses fictional alerts, so the APK does not need a relay.
-
 ```mermaid
 flowchart LR
-  subgraph Local["Mac process"]
-    S[run loop] --> C[Checks]
-    C --> R[Rules]
-    R --> L[(JSON-lines log)]
-    V[Signature check] --> F[Fix runner]
+  subgraph Mac[Mac]
+    P[Plug-ins] --> C[Checks]
+    C --> R[Fixed rules]
+    R --> L[(Local log)]
+    V[Approval verifier] --> F[Allowlisted fix]
     F --> C
     F --> L
   end
-  R -- outbound --> W[Relay mailbox]
-  W -- stored approval --> V
-  Ph[Android app] -- signed approval --> W
-  W -- alert page --> Ph
+  W[Worker relay mailbox]
+  Ph[Android app]
+  R -- outbound HTTPS alert --> W
+  Ph -- signed approval --> W
+  W -- polled approval --> V
+  F -- result --> W
+  W -- polled alerts --> Ph
 ```
 
-Plug-ins are YAML or TOML files. A service plug-in selects a process, or it watches a launchd job or a file and names no process. It lists checks cheapest first, stores plain-English messages, and approves `stop`, `restart`, `force-restart`, or `launchctl_kickstart`. `process.match` is an exact process name or executable path. `process.cmd_contains` is a command-line substring, and `process.cmd_regex` is a regular expression on the command line, so a service started by `node` can match its script without the whole command. When more than one of those is set, all of them have to match. A plug-in that matches only by `cmd_contains` or `cmd_regex` uses its display name in the running and not-running lines. `plugins/this-mac.yaml` is the host plug-in: sleep or wake, network, free disk space, memory pressure, and CPU. It does not name a process and it has no fixes. The other shipped plug-ins are a generic desktop app, Codex, ChatGPT, a local gateway, Proton Mail Bridge, Syncthing, Screen Sharing, and the fictional `example-desktop-app`.
+- **Mac:** checks on the configured interval, logs locally with secret-looking values blanked, and polls for pairing messages and approvals every five seconds as well as after check cycles.
+- **Relay:** a Cloudflare Worker with a SQLite-backed Durable Object per Mac id. It stores `pairing`, `alerts`, `approvals` and `results`; pages are capped at 100 records. It does not verify approvals or run commands.
+- **Android:** shows alerts, service status and history, and signs approvals. It polls every 15 seconds while its process runs. The relay's push delivery is still a stub.
 
-Checks read processes, established outbound TCP connections, launchd job results, file modification times, and host readings through a `Source` interface. Tests pass an in-memory source. On Linux the live source reads `/proc` and `df -P /`. On macOS it reads `ps`, `lsof`, `route`, `df`, `sysctl` or `memory_pressure`, and `pmset -g log`. The executable path comes from `ps -o comm=`, as its own column. It is not the first word of the command line, so an application path that contains spaces stays whole. A failed host command leaves that reading unknown. Unknown sleep or network does not raise an alert and does not pause anything.
+### Plug-ins and fixes
 
-Rules:
+A plug-in selects a process or scheduled job, lists checks cheapest first, and defines allowed actions. For example:
 
-- **Down:** the process is missing on 2 checks in a row. The alert offers `restart` when that action is approved, or `launchctl_kickstart` when restart is not approved and kickstart is.
-- **Running but stuck:** the process is up, and a health check has failed. The built-in health check counts established outbound TCP connections in the process tree and fails when that count stays at zero for N checks in a row. `file_recent` fails when a configured file is missing or older than `max_age`. The alert offers `force-restart` when that action is approved.
-- **Started without its required settings:** `launched_with_flags` fails when the command line does not contain every configured flag. The alert says the service started without its required settings and offers `restart` when that action is approved.
-- **Launchd job:** `launchd_job` is for a periodic job that exits. `max_age` is optional. A last exit status other than 0 fails the check. With no age limit, a last exit status of 0 passes. `launchctl print` reports `last exit code`, `runs`, and `run interval`. It does not report a last exit time. When the standard output file is known, a modification time older than `max_age` (or the run interval, when `max_age` is omitted) fails the check. Otherwise the check remembers `runs` and fails when that count does not increase within the run interval. The alert offers `launchctl_kickstart` when that action is approved. A plug-in can be only this check, or only `file_recent`, with no process match. A label may contain spaces. It is one argument, with no shell.
-- **Sleep or wake:** a transition raises one alert. The first awake sample does not. While the Mac is asleep, service checks are skipped.
-- **Network down:** no IPv4 default route. Other alerts pause. When the route returns, every plug-in is checked again and one summary is sent. The summary counts every loaded plug-in, including This Mac. Services that are not healthy are named on that summary.
-- **Low disk:** free space below `min_free_percent`. The shipped file uses 10. Exactly that percent does not alert. No fix is offered.
-- **CPU and memory:** a share of the machine at or above the threshold, or memory pressure at or above the configured level, for the configured duration. Both default to 5 minutes when a file omits the duration, and CPU defaults to 85 when a file omits the percent. The shipped file sets 85 and 5m. A sample under the line resets the window. The alert names the highest CPU process, or the largest memory user. A watched service is offered `stop` and `restart` only when those actions are on its allowlist. Any other process is offered `stop` only. A hog does not count toward keeps-happening.
-- The same condition does not raise a second alert.
-- **Keeps happening:** 3 new failures for one service inside 1 hour. The alert stops offering a fix.
-
-`stop` and `restart` send TERM. `force-restart` sends KILL. The signal goes to the matched process and to its child processes, children first, so restarting an app also stops the helpers that app started. `stop` never launches a program. An optional launcher path on `restart` or `force-restart` is executed directly, with no shell. `args` on that fix are the fixed arguments from the plug-in file. `launchctl_kickstart` does not send a separate stop first. It runs `launchctl kickstart -k gui/<uid>/<label>`, where the label comes from the plug-in and may contain spaces, and the uid is the user running Daemon Doctor, read when the fix runs. The label is one argument. `--dry-run` skips the signal and the launch and still rechecks. A real fix on this machine asks for `y` in the terminal unless `--yes` is set. `fix --approval` reads a signed approval file. The signature is the approval. `--yes` does not skip that check. PID 1, this process, and its parent are never signalled. `fix --process` accepts only `stop`, and only for the process named by the latest unwatched CPU or memory alert in the local log.
-
-`daemon-doctor pair` creates an Ed25519 keypair in the state directory (mode 0600) and prints a one-time pairing payload plus a terminal QR. `--out pairing.png` also saves that exact payload as a PNG with mode 0600 and refuses to overwrite an existing file. The payload is `daemon-doctor:2`, the Mac id, the Mac public key, a one-time code, and the relay URL when one is set. The private key is not in the payload. The phone authenticates its public key with HMAC-SHA256 using the QR secret; the proof binds the Mac id, Mac public key, pairing id (SHA-256 of the secret), and phone public key. Only the pairing id, phone public key, and proof go through the relay. With no `relay.url`, pair saves the code and exits. With a relay URL, it polls until a phone posts its public key or the code expires (10 minutes). `pair --list` prints the fingerprint of each paired phone key, the first 8 bytes of SHA-256 as hex.
-
-An approval is signed by a paired phone key. The signed text is the Mac id, alert id, fix id, a one-time nonce, and an expiry. The Mac accepts it only when the signature matches a paired key, the alert is one this Mac recorded, the fix id is one that alert offered, the expiry is still ahead and no further ahead than 10 minutes plus 1 minute of clock skew, and the nonce has not been used. A second use is refused, even by another already-open process: state refresh and nonce consumption share a file lock, and the nonce journal is synced before a fix can run. Unknown JSON fields are refused, so a command cannot ride along in the message. The fix that runs is the one stored with the alert.
-
-The local JSON-lines file records a check when that service's status changes, plus one hourly summary of the current status of each service. Alerts and fixes are still recorded when they happen. The file rotates at 1 MiB. The previous file is the same path with `.1` added. Values that look like tokens, passwords, or private keys are replaced with `[blanked]`.
-
-## Install
-
-### macOS
-
-Build the program and keep the real config outside the repo:
-
+```yaml
+id: example-sync
+name: Example Sync
+process:
+  match: example-sync
+checks:
+  - type: process_running
+fixes:
+  stop:
+    kind: stop
+  restart:
+    kind: restart
+    launcher: /opt/example-sync/bin/example-sync
+    args: ["--config", "/opt/example-sync/config.xml"]
+  force-restart:
+    kind: force-restart
+    launcher: /opt/example-sync/bin/example-sync
+    args: ["--config", "/opt/example-sync/config.xml"]
 ```
+
+Replace the example paths with the executable and arguments for your service. `restart` sends TERM and `force-restart` sends KILL to the matched process and its children, children first. **Both actions need a `launcher` setting to relaunch the service.** Without it, they only signal the processes and re-check. The launcher is an absolute executable path, run directly with the fixed `args` from the plug-in, without a shell. `stop` never launches anything. For a launchd-managed service, `launchctl_kickstart` takes a `label` instead of a launcher.
+
+The supplied plug-ins are starting points: configure launchers before relying on their restart actions. Process selection also supports command-line substrings and regular expressions; checks include outbound TCP connections, required flags, recent files and launchd job results.
+
+### Alerts
+
+| Condition | Behaviour |
+|---|---|
+| Down | Two consecutive missing-process checks; offers an approved restart or launchd kickstart. |
+| Running but stuck | A failing health signal; offers an approved force restart. |
+| Missing flags or failed scheduled job | Offers the configured restart or kickstart. |
+| CPU or memory pressure | Sustained resource use names the culprit. An unwatched process can only be stopped. |
+| Network down or sleep | Service checks pause; network recovery produces a summary. |
+| Low disk | Reports the condition without offering a fix. |
+| Repeated failures | Three incidents in an hour stop phone fix offers. |
+
+Thresholds live in the plug-in files. Fixes are re-checked and logged locally. The signed-approval path also attempts to post outcomes to the relay's `results` mailbox when a relay is configured; ordinary local CLI fixes report outcomes in the terminal and local log.
+
+### Pairing and approval trust
+
+First pairing trusts the version 2 QR shown by the local Mac and the phone that receives it. The QR contains the Mac id, Mac public key, relay URL and a random one-time secret. Keep the QR, PNG and pasted payload private: anyone holding that secret during its ten-minute validity window can register a key.
+
+The phone sends its public key, a pairing id (SHA-256 of the secret), and an HMAC-SHA256 proof. The proof binds the Mac id, Mac public key, pairing id and phone public key. **The QR secret never goes through the relay.** The Mac checks the proof and local expiry before storing the key, so the relay cannot substitute its own key without knowing the secret. The secret registers one key; delivery of that same registration can be repeated safely.
+
+Phone-approved fixes need an Ed25519 approval signed by a paired phone. Local fixes accept terminal confirmation or `--yes` without a phone signature. For a phone approval, the Mac checks that:
+
+1. the signature matches a trusted phone key and the approval names this Mac;
+2. the alert was raised locally and offered that exact fix;
+3. the expiry is in the future and within ten minutes, plus one minute of clock skew;
+4. the nonce has not been used, including by another process sharing the state directory.
+
+Nonce consumption is locked across processes and synced before the fix runs. Extra approval fields are refused. The relay can read alert text and delay, drop or replay messages, but cannot forge a pairing proof or a valid approval without the relevant secret or phone key. This assumes the Mac, phone and their local key storage remain trusted.
+
+Version 1 pairing payloads and registrations are refused. Old `phones.json` is preserved but no longer trusted; upgrade the Mac and Android app and pair again to store authenticated keys in `phones-v2.json`.
+
+## Quick start
+
+Build the Mac program with Go 1.25 or later. Relay deployment uses Node 22 and a Cloudflare account. Android builds use Java 17 and the Android SDK; a prebuilt debug APK is also available through the workflow described below.
+
+### 1. Set up the Mac
+
+```sh
 go build -o daemon-doctor ./cmd/daemon-doctor
-mkdir -p ~/.config/daemon-doctor
+mkdir -p ~/bin ~/.config/daemon-doctor/plugins
+cp daemon-doctor ~/bin/
 cp config.example.yaml ~/.config/daemon-doctor/config.yaml
+cp plugins/this-mac.yaml plugins/syncthing.yaml ~/.config/daemon-doctor/plugins/
+~/bin/daemon-doctor status
 ```
 
-Edit that copy. `config.example.yaml` leaves `relay.url` unset, so the program stays local until you set one there. `launchd/com.example.daemon-doctor.plist` is an example LaunchAgent. Replace `/path/to/daemon-doctor` and `/path/to/config.yaml`, then load it as the normal user:
+Copy only plug-ins for services you run, and configure their fixes. `plugins_dir` is resolved relative to the config file. Keep the real config and keys outside the checkout.
 
-```
-cp launchd/com.example.daemon-doctor.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.daemon-doctor.plist
-```
+### 2. Deploy the relay
 
-To stop it: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.example.daemon-doctor.plist`. The plist does not set a user and it is not for root. `launchd/com.example.local-gateway.plist` is a separate example for a helper program, with placeholder paths.
+From `relay/`:
 
-### Relay
-
-The owner deploys the worker. This repo does not. `relay/wrangler.toml` has no account id, no API token, and no route. `workers_dev` is true, so a free Cloudflare account can deploy it to its own workers.dev subdomain with no route or zone. From `relay/`:
-
-```
+```sh
 npm ci
 npx wrangler login
 npx wrangler deploy
 ```
 
-`GET /health` on the deployed worker returns `{"ok":true}`. Set the deployed origin in the local config (no path, query, credentials, or fragment):
+`relay/wrangler.toml` enables `workers_dev`, so Wrangler deploys to your account's workers.dev address without a custom route. `GET /health` returns `{"ok":true}`:
+
+```sh
+curl https://your-relay.example.workers.dev/health
+```
+
+Set the deployed origin in the local config, using the placeholder below as an example:
 
 ```yaml
 relay:
   url: https://your-relay.example.workers.dev
 ```
 
-The example above is a placeholder. Keep the actual URL in `~/.config/daemon-doctor/config.yaml`. The old `relay_url` key is still accepted for existing configs; use only one form. Run `daemon-doctor pair --out pairing.png` and scan the terminal QR or PNG within ten minutes, then start `daemon-doctor run`. Pairing waits for the phone's public key; Ctrl-C exits while leaving the code available to the run process until it expires.
+Use an origin without a path, query or credentials. Leaving `relay.url` unset keeps alerts local.
 
-### Android sideload
+### 3. Install the Android app
 
-From `android/`:
+The [Android APK workflow](.github/workflows/android-apk.yml) builds on pushes to `main` and uploads the `daemon-doctor-debug-apk` artifact containing an APK and its `.sha256` file. Pushes of `v*` tags also attach those files to the corresponding [release](https://github.com/ZeroCool0388/daemon-doctor/releases). Download the artifact from a completed [workflow run](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/android-apk.yml), or use a tagged release asset, and open the APK on your phone to sideload it.
 
-```
-./gradlew :app:assembleDebug
-```
+CI builds use fresh debug signing keys. Installing a newer CI build over an older one requires uninstalling the older app first, which removes its saved pairing. To build locally, run `./gradlew :app:assembleDebug` in `android/`; the output is `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. The `Android APK` workflow also builds it on every push to `main` and uploads it as the `daemon-doctor-debug-apk` artifact, with a `.sha256` file. Pushing a `v*` tag attaches the same two files to a GitHub release for that tag. Each CI run signs with a fresh debug key, so installing a newer CI build over an older one needs an uninstall first. Install it with `adb install -r` on that file, or copy it to the phone and open it there. The phone has to allow install of that file. The app starts in demo mode, so it does not need `google-services.json` or a relay. To turn on Firebase later, copy `android/google-services.json.example` to `android/app/google-services.json` and replace the placeholders with the owner's Firebase project. That copy is gitignored.
+### 4. Pair the phone
 
-```
-go build -o daemon-doctor ./cmd/daemon-doctor
-daemon-doctor demo
-daemon-doctor status --config config.example.yaml
-daemon-doctor run --config config.example.yaml
-daemon-doctor pair --out pairing.png --config config.example.yaml
-daemon-doctor fix --service example-desktop-app --action force-restart --dry-run --config config.example.yaml
-daemon-doctor fix --process ExampleTool --action stop --dry-run --config config.example.yaml
-daemon-doctor fix --approval approval.json --dry-run --config config.example.yaml
+```sh
+~/bin/daemon-doctor pair --out pairing.png
 ```
 
-## Test results
+`daemon-doctor pair` prints the QR and payload in the terminal. **`--out pairing.png` also writes a PNG**, with mode 0600, and refuses to overwrite an existing file. Scan either QR from the app's pairing screen, or paste the payload. The Mac prints `paired` and the phone key fingerprint after verifying the proof. `daemon-doctor pair --list` lists trusted fingerprints.
 
-Counts below are copied from GitHub Actions run [38244144421](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38244144421) (push of `5ed9d3f` on `cursor/launchd-print-fixes-f670`, 2026-10-12, conclusion success). The pull request run [38244160401](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38244160401) on the same commit also succeeded. Go on that runner was go1.25.14, image ubuntu-24.04.
+The Mac private key stays in the state directory with mode 0600. The phone uses Android Keystore when Ed25519 is available, otherwise an app-private signing seed.
 
-The `go test summary` step printed these lines from `go test -count=1 -json ./...`:
+### 5. Run at login
 
-```
-ok	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.004s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/config	0.008s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/demo	0.008s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.364s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.032s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.035s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.007s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.218s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.012s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.003s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/security	0.019s
-ok	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.047s
-pass events with a test name: 131
-subtests: 26
+Replace the binary and config paths in `launchd/com.example.daemon-doctor.plist`, then install it as the normal user:
+
+```sh
+cp launchd/com.example.daemon-doctor.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.daemon-doctor.plist
 ```
 
-The elapsed figures are the package times from that JSON run. The step exits on a fail event; this log has none.
+For foreground monitoring, run `~/bin/daemon-doctor run`. Local fixes prompt for `y` unless `--yes` is set; `--dry-run` re-checks without signalling or launching anything. `fix --approval approval.json` verifies a signed approval even when `--yes` is supplied.
 
-Relay `npm test` printed this Vitest summary. The duration is the runner total.
+## Verification
 
-```
- Test Files  1 passed (1)
-      Tests  8 passed (8)
-   Start at  11:40:30
-   Duration  1.17s (transform 33ms, setup 0ms, import 60ms, tests 71ms, environment 0ms)
-```
+CI runs formatting, Go checks, relay tests and Android unit tests and builds. To run them locally:
 
-The Android job printed:
-
-```
-android unit tests: 11 failures=0 errors=0 skipped=0
+```sh
+gofmt -l .
+go vet ./...
+go test ./...
+(cd relay && npm ci && npm test)
+(cd android && ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug)
 ```
 
-Gradle printed `BUILD SUCCESSFUL in 2m 46s`. The job uploaded the `debug-apk` artifact (id 11743604737, zip size 24572580 bytes).
+The suites cover scripted incidents, hostile-relay messages, shared nonce consumption, pairing proofs and Go/Android signing fixtures.
 
-## Cost
+## Cost and latency
 
-£0.
-
-Nothing in this repo is deployed, and the repo holds no account id, API token, or Firebase project. The Go program and the demo have no license fee. GitHub Actions runs the tests on the public repository. The debug APK is sideloaded, so there is no store fee. The relay is written for the Workers free plan and is not deployed from here, so there is no Cloudflare invoice. FCM is unwired unless the owner adds a gitignored `google-services.json`. There is no bill to report for this project.
-
-## Latency
-
-Measured locally with Go 1.25.14 (`go version go1.25.14 linux/amd64`) on Linux amd64. `go test` printed `cpu: Intel(R) Xeon(R) Processor`.
-
-Check loop, one untimed `doctor.Cycle` and then the timed loop. Each operation is one cycle on the demo's healthy fake snapshot. The 30 second run interval is not included.
-
-```
-go test -bench=BenchmarkCheckCycle -benchtime=1s -count=1 ./internal/demo
-```
-
-```
-BenchmarkCheckCycle-4   	  188745	      6409 ns/op
-```
-
-Approval verification, one untimed `Store.Consume` and then the timed loop. Each operation signs a new approval and calls `Store.Consume`, which checks the signature, the paired key, the alert, the fix, the expiry, and appends the nonce.
-
-```
-go test -bench=BenchmarkApprovalVerify -benchtime=1s -count=1 ./internal/security
-```
-
-```
-BenchmarkApprovalVerify-4   	   19520	     61556 ns/op
-```
-
-Those two lines are the benchmark tool's output for that run. Time from a failure to a phone, and time from a tap to a finished fix, are not measured.
+The program and app use free dependencies, and the relay is designed for the Workers free tier. With the example intervals, continuous Mac and Android polling is about 46,080 requests/day before message posts, retries and pairing. Usage determines whether a deployment stays within provider limits. End-to-end failure-to-phone and approval-to-result latency is not established by the demo.
 
 ## Limits and next steps
 
-- Linux live checks do not report sleep. The process is running, and this build has no separate sleep signal there. macOS sleep comes from `pmset -g log`.
-- Linux memory pressure is `MemAvailable` divided by `MemTotal`: at least 20% available is normal, at least 10% is warning, and below that is critical. macOS uses `kern.memorystatus_vm_pressure_level` when `sysctl` returns it.
-- Linux CPU percentages need two samples. The first sample has no percentage. The figure is that process's tick delta divided by the machine tick delta, capped at 100.
-- The network check looks for an IPv4 default route. It does not store the gateway address.
-- The stuck health signal shipped here is an established outbound TCP count, a launchd job that did not finish successfully, or a file that is missing or older than its `max_age`. Another signal can be registered behind the same check interface.
-- Restarting or force-restarting an app also stops its child processes. `launchctl_kickstart` does not send a separate stop signal before `launchctl kickstart -k`.
-- `launchd_job` reads `launchctl print` on macOS. The service target is `gui/<uid>/<label>` with the uid of the user running Daemon Doctor. On Linux the reading is absent and the check says the job has no recorded last run. The `runs` count is remembered in the `run` process, so one `status` sample does not by itself call a job stale for a stuck count. A standard-output file older than its limit does.
-- Consecutive-check state lives in the `run` process. `status` is one sample, so a single `status` call does not by itself raise a Down alert or a 5-minute resource alert.
-- After 3 failures in an hour the alert stops offering a fix. `daemon-doctor fix` still runs an allowlisted action when you ask it to.
-- A local `y` still approves a fix typed on this machine. A phone approval is a separate signed message.
-- Pairing version 2 keeps the QR secret off the relay and refuses substituted keys, altered proofs, expired registrations, and the old secret-bearing registration format. Both Mac and Android need the new protocol. Old `phones.json` is preserved but its keys are no longer trusted for approvals. Pair again with a fresh version 2 QR; authenticated keys are saved in `phones-v2.json`. Old pending QR codes and version 1 QR payloads are refused.
-- Alert text is not encrypted. The mailbox can read the short alert it stores.
-- The phone keeps its paired Mac id in app-private preferences. The one-time pairing code is stored with that payload. The private key is not.
-- Camera scanning and Android Keystore signing were not run on a device. The unit tests use the software signer. `selectBackend` chooses the keystore path only when Ed25519 key generation succeeds; any failure uses the app-private seed.
-- Without `google-services.json`, Firebase is not configured and the app relies on polling while its process is running. A push does not arrive in that build.
-- The Android screens were not opened on a device. The terminal demo is covered by a unit test. A GIF was not produced.
-- An iPhone app is later.
+- Phone alerts rely on polling while the app process runs; relay push delivery still needs wiring.
+- The Android app does not display the relay's fix results yet. Use the local log to inspect the action and recheck.
+- Alerts are not encrypted end to end. The QR secret and private signing keys stay off the relay.
+- Failed deliveries retry in memory and are lost if the Mac process exits. Retry work and request timeouts are bounded to keep monitoring responsive.
+- The repository's tests do not establish camera scanning, Keystore support or the complete Mac-to-phone flow on a physical device.
 
-Next is device testing of the Android app. An iPhone app comes after that.
+Next: validate the complete flow on a Mac and Android phone, measure end-to-end latency, and connect push delivery. An iPhone app comes later.
 
 ## License
 
