@@ -4,3 +4,27 @@
 plugins_dir: plugins
 log_path: /tmp/daemon-doctor/events.jsonl
 interval: 30s
+
+# A service plug-in can match more than the process name. All set fields must match.
+# process:
+#   match: node
+#   cmd_contains: example-gateway
+#   cmd_regex: "example-gateway/server\\.js"
+# checks:
+#   - type: process_running
+#   - type: launchd_job
+#     label: com.example.health
+#     max_age: 10m
+#   - type: launched_with_flags
+#     flags: ["--config"]
+#   - type: file_recent
+#     path: /tmp/example-heartbeat
+#     max_age: 5m
+# fixes:
+#   restart:
+#     kind: restart
+#     launcher: /opt/example-launch
+#     args: ["--config", "/opt/example.yaml"]
+#   launchctl_kickstart:
+#     kind: launchctl_kickstart
+#     label: com.example.health

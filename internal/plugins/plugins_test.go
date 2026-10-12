@@ -3,6 +3,7 @@ package plugins
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestLoadExampleYAMLAndTOML(t *testing.T) {
 		t.Fatalf("check count yaml %d toml %d", len(fromYAML.Checks), len(fromTOML.Checks))
 	}
 	for i := range fromYAML.Checks {
-		if fromYAML.Checks[i] != fromTOML.Checks[i] {
+		if !reflect.DeepEqual(fromYAML.Checks[i], fromTOML.Checks[i]) {
 			t.Fatalf("check %d yaml %+v toml %+v", i, fromYAML.Checks[i], fromTOML.Checks[i])
 		}
 	}
@@ -208,5 +209,64 @@ func TestHostPluginValidation(t *testing.T) {
 	}
 	if err := Validate(&stop, BuiltinCosts()); err == nil || !strings.Contains(err.Error(), "launcher") {
 		t.Fatalf("stop launcher: %v", err)
+	}
+}
+
+func TestCommandMatchAndNewChecks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := &Plugin{
+		ID:   "example-gateway",
+		Name: "Example Gateway",
+		Process: ProcessMatch{
+			Match:       "node",
+			CmdContains: "example-gateway",
+			CmdRegex:    `example-gateway/server\.js`,
+		},
+		Checks: []Check{
+			{Type: CheckProcessRunning},
+			{Type: CheckLaunchedWithFlags, Flags: []string{"--config"}},
+			{Type: CheckFileRecent, Path: "~/Library/example-heartbeat", MaxAge: "5m"},
+		},
+		Fixes: map[string]Fix{
+			FixRestart: {
+				Kind:     FixRestart,
+				Launcher: "/opt/example-launch",
+				Args:     []string{"--config", "/opt/example.yaml"},
+			},
+		},
+	}
+	if err := Validate(p, BuiltinCosts()); err != nil {
+		t.Fatal(err)
+	}
+	if p.Process.Spec().Pattern == nil || p.Checks[2].Path != filepath.Join(home, "Library", "example-heartbeat") {
+		t.Fatalf("process %+v path %q", p.Process, p.Checks[2].Path)
+	}
+	if strings.Join(p.Fixes[FixRestart].Args, " ") != "--config /opt/example.yaml" {
+		t.Fatalf("args %+v", p.Fixes[FixRestart])
+	}
+
+	job := Plugin{
+		ID:      "example-health",
+		Name:    "Example Health",
+		Process: ProcessMatch{CmdContains: "example-health"},
+		Checks:  []Check{{Type: CheckLaunchdJob, Label: "com.example.health", MaxAge: "10m"}},
+		Fixes:   map[string]Fix{FixKickstart: {Kind: FixKickstart, Label: "com.example.health"}},
+	}
+	if err := Validate(&job, BuiltinCosts()); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := []Plugin{
+		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{CmdRegex: "("}, Checks: []Check{{Type: CheckProcessRunning}}},
+		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckLaunchdJob, Label: "com.example.health", MaxAge: "10m"}, {Type: CheckProcessRunning}}},
+		{ID: "example-health", Name: "Example Health", Process: ProcessMatch{CmdContains: "example-health"}, Checks: []Check{{Type: CheckLaunchdJob, Label: "not a label", MaxAge: "10m"}}},
+		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckProcessRunning}}, Fixes: map[string]Fix{FixKickstart: {Kind: FixKickstart, Label: "com.example.health", Launcher: "/bin/launchctl"}}},
+		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckProcessRunning}}, Fixes: map[string]Fix{FixRestart: {Kind: FixRestart, Args: []string{"--config"}}}},
+	}
+	for i, plugin := range bad {
+		if err := Validate(&plugin, BuiltinCosts()); err == nil {
+			t.Fatalf("case %d should fail", i)
+		}
 	}
 }

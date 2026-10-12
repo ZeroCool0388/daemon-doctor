@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DisplayName is the short process name used in alerts.
@@ -352,6 +353,8 @@ func ParseMemoryPressureText(text string) (level string, known bool) {
 
 // ParsePSResource reads "pid ppid %cpu rss command" lines.
 // %cpu is the raw ps value. rss is kilobytes. Callers scale %cpu to a machine share.
+// The command line is stored whole. The executable path is not taken from it,
+// because an application path can contain spaces.
 func ParsePSResource(text string) ([]Process, error) {
 	var procs []Process
 	for _, line := range strings.Split(text, "\n") {
@@ -376,15 +379,9 @@ func ParsePSResource(text string) ([]Process, error) {
 			return nil, fmt.Errorf("ps line has no rss: %q", line)
 		}
 		cmd := strings.TrimSpace(rest)
-		exe := cmd
-		if i := strings.IndexAny(cmd, " \t"); i >= 0 {
-			exe = cmd[:i]
-		}
 		procs = append(procs, Process{
 			PID:         pid,
 			PPID:        ppid,
-			Name:        filepathBase(exe),
-			Exe:         exe,
 			Cmd:         cmd,
 			CPUKnown:    true,
 			CPUPercent:  cpu,
@@ -393,6 +390,116 @@ func ParsePSResource(text string) ([]Process, error) {
 		})
 	}
 	return procs, nil
+}
+
+// ParsePSPaths reads "pid path" lines from `ps -o pid= -o comm=`.
+// The path is the rest of the line, so it may contain spaces.
+func ParsePSPaths(text string) (map[int]string, error) {
+	out := map[int]string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, rest, ok := leadingInt(line)
+		if !ok {
+			return nil, fmt.Errorf("ps path line has no pid: %q", line)
+		}
+		path := strings.TrimSpace(rest)
+		if path == "" || pid <= 0 {
+			continue
+		}
+		out[pid] = path
+	}
+	return out, nil
+}
+
+// ApplyExePaths sets Exe and Name from a pid-to-path map.
+// Name is the base name of that path. Paths that are missing are left unset.
+func ApplyExePaths(procs []Process, paths map[int]string) []Process {
+	out := append([]Process(nil), procs...)
+	for i := range out {
+		path := strings.TrimSpace(paths[out[i].PID])
+		if path == "" {
+			continue
+		}
+		out[i].Exe = path
+		out[i].Name = filepathBase(path)
+	}
+	return out
+}
+
+// ParseLaunchctlPrint reads `launchctl print` text for one job.
+// It looks for the last exit code and the last exit time.
+func ParseLaunchctlPrint(text string) (LaunchdJob, bool) {
+	var job LaunchdJob
+	for _, line := range strings.Split(text, "\n") {
+		key, val, ok := splitEq(line)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "last exit code":
+			if code, known := parseExitCode(val); known {
+				job.ExitCode = code
+				job.ExitKnown = true
+			}
+		case "last exit time":
+			if ts, known := parseLaunchdTime(val); known {
+				job.LastRun = ts
+				job.LastRunKnown = true
+			}
+		}
+	}
+	return job, job.ExitKnown || job.LastRunKnown
+}
+
+func splitEq(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	idx := strings.Index(line, "=")
+	if idx <= 0 {
+		return "", "", false
+	}
+	return line[:idx], strings.TrimSpace(line[idx+1:]), true
+}
+
+func parseExitCode(val string) (int, bool) {
+	val = strings.TrimSpace(val)
+	if val == "" || strings.Contains(strings.ToLower(val), "never") {
+		return 0, false
+	}
+	val = strings.Trim(val, "()")
+	fields := strings.Fields(val)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseLaunchdTime(val string) (time.Time, bool) {
+	val = strings.TrimSpace(val)
+	if val == "" || val == "-" || strings.EqualFold(val, "never") {
+		return time.Time{}, false
+	}
+	if n, err := strconv.ParseInt(val, 10, 64); err == nil && n > 0 {
+		return time.Unix(n, 0).UTC(), true
+	}
+	layouts := []string{
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05 MST",
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+	}
+	for _, layout := range layouts {
+		if ts, err := time.Parse(layout, val); err == nil {
+			return ts.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func leadingFloat(s string) (float64, string, bool) {

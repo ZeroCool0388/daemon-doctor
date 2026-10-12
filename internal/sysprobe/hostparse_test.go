@@ -3,6 +3,7 @@ package sysprobe
 import (
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -180,8 +181,58 @@ func TestParsePSResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(procs) != 1 || procs[0].Name != "example-tool" || procs[0].CPUPercent != 170 || procs[0].MemoryBytes != 2048*1024 {
+	if len(procs) != 1 || procs[0].Cmd != "example-tool --flag" || procs[0].Exe != "" || procs[0].CPUPercent != 170 || procs[0].MemoryBytes != 2048*1024 {
 		t.Fatalf("%+v", procs)
+	}
+}
+
+func TestAppPathWithSpaces(t *testing.T) {
+	const cmd = "  42  1  2.5  4096 /Applications/Some App.app/Contents/MacOS/Some App --disable-renderer-backgrounding\n"
+	procs, err := ParsePSResource(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) != 1 {
+		t.Fatalf("%+v", procs)
+	}
+	if procs[0].Exe != "" || procs[0].Name != "" {
+		t.Fatalf("command line was split into an executable: %+v", procs[0])
+	}
+	if !strings.Contains(procs[0].Cmd, "/Applications/Some App.app/Contents/MacOS/Some App") || !strings.Contains(procs[0].Cmd, "--disable-renderer-backgrounding") {
+		t.Fatalf("command %q", procs[0].Cmd)
+	}
+	paths, err := ParsePSPaths("42 /Applications/Some App.app/Contents/MacOS/Some App\n 7 /usr/local/bin/example-tool\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	procs = ApplyExePaths(procs, paths)
+	const want = "/Applications/Some App.app/Contents/MacOS/Some App"
+	if procs[0].Exe != want || procs[0].Name != "Some App" {
+		t.Fatalf("exe %q name %q", procs[0].Exe, procs[0].Name)
+	}
+	if strings.HasPrefix(procs[0].Exe, "/Applications/Some ") && !strings.Contains(procs[0].Exe, "App.app") {
+		t.Fatal("path was truncated at the first space")
+	}
+}
+
+func TestParseLaunchctlPrint(t *testing.T) {
+	text := `
+gui/501/com.example.health = {
+	state = not running
+	last exit code = 0
+	last exit time = 1700000000
+}
+`
+	job, ok := ParseLaunchctlPrint(text)
+	if !ok || !job.ExitKnown || job.ExitCode != 0 || !job.LastRunKnown || job.LastRun.Unix() != 1700000000 {
+		t.Fatalf("%+v ok %v", job, ok)
+	}
+	bad, ok := ParseLaunchctlPrint("last exit code = 2\nlast exit time = 2026-01-02 12:00:00 +0000\n")
+	if !ok || bad.ExitCode != 2 || bad.LastRun.UTC().Format("15:04") != "12:00" {
+		t.Fatalf("%+v", bad)
+	}
+	if _, ok := ParseLaunchctlPrint("last exit code = (never exited)\n"); ok {
+		t.Fatal("a job that has never exited should be unknown")
 	}
 }
 

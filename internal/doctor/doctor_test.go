@@ -103,9 +103,63 @@ func TestReplayStuckWhileProcessRemainsUp(t *testing.T) {
 			checks++
 		}
 	}
-	if alerts != 1 || checks != 5 {
+	if alerts != 1 || checks != 3 {
 		t.Fatalf("log alerts %d checks %d", alerts, checks)
 	}
+}
+
+func TestLogRecordsStateChangesAndHourlySummary(t *testing.T) {
+	book, err := logbook.Open(filepath.Join(t.TempDir(), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer book.Close()
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	src := &sysprobe.MemSource{}
+	src.Set(running(2))
+	d, err := New([]plugins.Plugin{loadExample(t)}, src, nil, book, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := d.Cycle(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checks, summaries := countKinds(t, book.Path())
+	if checks != 1 || summaries != 0 {
+		t.Fatalf("before the hour: checks %d summaries %d", checks, summaries)
+	}
+	now = now.Add(time.Hour)
+	if _, err := d.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	checks, summaries = countKinds(t, book.Path())
+	if checks != 1 || summaries != 1 {
+		t.Fatalf("after the hour: checks %d summaries %d", checks, summaries)
+	}
+	var summary string
+	for _, event := range readEvents(t, book.Path()) {
+		if event.Kind == "summary" {
+			summary = event.Message
+		}
+	}
+	if summary != "Hourly summary. Example Desktop App: ok." {
+		t.Fatalf("summary %q", summary)
+	}
+}
+
+func countKinds(t *testing.T, path string) (checks, summaries int) {
+	t.Helper()
+	for _, event := range readEvents(t, path) {
+		switch event.Kind {
+		case "check":
+			checks++
+		case "summary":
+			summaries++
+		}
+	}
+	return checks, summaries
 }
 
 func TestDryRunFixIsLoggedAndUnknownFixIsRefused(t *testing.T) {

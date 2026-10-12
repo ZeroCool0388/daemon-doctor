@@ -34,11 +34,16 @@ type Event struct {
 	DurationMS  int64     `json:"duration_ms,omitempty"`
 }
 
-// Book is an append-only JSON-lines log.
+// DefaultMaxBytes is the size at which the log rotates.
+// The current file is renamed to the same path with a ".1" suffix.
+const DefaultMaxBytes int64 = 1 << 20
+
+// Book is a JSON-lines log. It records new lines and rotates at MaxBytes.
 type Book struct {
 	mu   sync.Mutex
 	f    *os.File
 	path string
+	max  int64
 }
 
 // Open creates or opens path for appending. The file mode is 0600.
@@ -50,7 +55,17 @@ func Open(path string) (*Book, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
 	}
-	return &Book{f: f, path: path}, nil
+	return &Book{f: f, path: path, max: DefaultMaxBytes}, nil
+}
+
+// SetMaxBytes changes the rotation limit. A non-positive value is ignored.
+func (b *Book) SetMaxBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	b.mu.Lock()
+	b.max = n
+	b.mu.Unlock()
 }
 
 // Path returns the log file path.
@@ -109,12 +124,42 @@ func (b *Book) Append(e Event) error {
 	buf = append(buf, '\n')
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := b.rotateIfNeeded(int64(len(buf))); err != nil {
+		return err
+	}
 	if _, err := b.f.Write(buf); err != nil {
 		return fmt.Errorf("append log: %w", err)
 	}
 	if err := b.f.Sync(); err != nil {
 		return fmt.Errorf("sync log: %w", err)
 	}
+	return nil
+}
+
+func (b *Book) rotateIfNeeded(next int64) error {
+	if b.max <= 0 {
+		return nil
+	}
+	info, err := b.f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat log: %w", err)
+	}
+	if info.Size() == 0 || info.Size()+next <= b.max {
+		return nil
+	}
+	if err := b.f.Close(); err != nil {
+		return fmt.Errorf("close log: %w", err)
+	}
+	backup := b.path + ".1"
+	_ = os.Remove(backup)
+	if err := os.Rename(b.path, backup); err != nil {
+		return fmt.Errorf("rotate log: %w", err)
+	}
+	f, err := os.OpenFile(b.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("reopen log: %w", err)
+	}
+	b.f = f
 	return nil
 }
 

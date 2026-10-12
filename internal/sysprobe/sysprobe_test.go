@@ -1,6 +1,7 @@
 package sysprobe
 
 import (
+	"regexp"
 	"testing"
 )
 
@@ -19,6 +20,24 @@ func TestMatchIsExact(t *testing.T) {
 	}
 	if Matches(proc, "example") || Matches(proc, "desktop-app") || Matches(proc, "") {
 		t.Fatal("partial names should not match")
+	}
+}
+
+func TestCommandLineMatch(t *testing.T) {
+	node := Process{PID: 8, Name: "node", Exe: "/usr/local/bin/node", Cmd: "node /opt/example-gateway/server.js --port 9"}
+	other := Process{PID: 9, Name: "node", Exe: "/usr/local/bin/node", Cmd: "node /opt/other-tool/server.js"}
+	snap := Snapshot{Processes: []Process{other, node}}
+	sel := Selector{Exact: "node", Contains: "example-gateway"}
+	found := MatchingSpec(snap, sel)
+	if len(found) != 1 || found[0].PID != 8 {
+		t.Fatalf("%+v", found)
+	}
+	re := regexp.MustCompile(`example-gateway/server\.js`)
+	if !MatchesSpec(node, Selector{Pattern: re}) || MatchesSpec(other, Selector{Pattern: re}) {
+		t.Fatal("regex should select only the gateway command")
+	}
+	if MatchesSpec(node, Selector{}) {
+		t.Fatal("an empty selector should match nothing")
 	}
 }
 

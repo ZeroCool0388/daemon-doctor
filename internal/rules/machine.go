@@ -312,10 +312,10 @@ func positiveDuration(raw string) (time.Duration, bool) {
 
 func watchedPlugin(samples []Sample, proc sysprobe.Process) (bool, plugins.Plugin) {
 	for _, sample := range samples {
-		if sample.Plugin.Host || sample.Plugin.Process.Match == "" {
+		if sample.Plugin.Host {
 			continue
 		}
-		if sysprobe.Matches(proc, sample.Plugin.Process.Match) {
+		if sysprobe.MatchesSpec(proc, sample.Plugin.Process.Spec()) {
 			return true, sample.Plugin
 		}
 	}

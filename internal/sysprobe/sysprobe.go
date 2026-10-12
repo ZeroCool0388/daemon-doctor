@@ -5,17 +5,20 @@ package sysprobe
 import (
 	"context"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Process is one running process.
 type Process struct {
 	PID         int
 	PPID        int
-	Name        string // kernel command name
-	Exe         string // argv0, when known
-	Cmd         string // command line for display; checks match on Name and Exe
+	Name        string // kernel command name, or the executable base name
+	Exe         string // executable path, looked up separately from the command line
+	Cmd         string // full command line, including arguments
 	CPUKnown    bool
 	CPUPercent  float64 // share of the whole machine, 0 to 100
 	MemoryKnown bool
@@ -36,12 +39,40 @@ type Host struct {
 	MemoryPressure      string // normal, warn, or critical
 }
 
+// LaunchdJob is the last exit of one launchd label.
+type LaunchdJob struct {
+	ExitCode     int
+	ExitKnown    bool
+	LastRun      time.Time
+	LastRunKnown bool
+}
+
+// FileStamp is the modification time of one configured path.
+type FileStamp struct {
+	ModTime time.Time
+	Known   bool
+	Missing bool
+}
+
+// ProbeHints names the launchd labels and files a sample should fill in.
+type ProbeHints struct {
+	Labels []string
+	Files  []string
+}
+
+// Hinted is a Source that can be told which labels and files to read.
+type Hinted interface {
+	SetHints(ProbeHints)
+}
+
 // Snapshot is one sample of processes, connections, and host readings.
 // OutboundPorts maps a PID to the remote ports of its established outbound connections.
 type Snapshot struct {
 	Processes     []Process
 	OutboundPorts map[int][]int
 	Host          Host
+	Launchd       map[string]LaunchdJob
+	Files         map[string]FileStamp
 }
 
 // Source takes a sample. Live system calls sit behind this interface.
@@ -115,11 +146,33 @@ func clone(s Snapshot) Snapshot {
 		Processes:     append([]Process(nil), s.Processes...),
 		OutboundPorts: make(map[int][]int, len(s.OutboundPorts)),
 		Host:          s.Host,
+		Launchd:       make(map[string]LaunchdJob, len(s.Launchd)),
+		Files:         make(map[string]FileStamp, len(s.Files)),
 	}
 	for pid, ports := range s.OutboundPorts {
 		out.OutboundPorts[pid] = append([]int(nil), ports...)
 	}
+	for label, job := range s.Launchd {
+		out.Launchd[label] = job
+	}
+	for path, stamp := range s.Files {
+		out.Files[path] = stamp
+	}
+	if len(s.Launchd) == 0 {
+		out.Launchd = nil
+	}
+	if len(s.Files) == 0 {
+		out.Files = nil
+	}
 	return out
+}
+
+// Selector chooses processes. Exact, Contains, and Pattern are combined:
+// every field that is set has to match. An empty selector matches nothing.
+type Selector struct {
+	Exact    string
+	Contains string
+	Pattern  *regexp.Regexp
 }
 
 // Matches reports whether p is the process named by match.
@@ -137,11 +190,33 @@ func Matches(p Process, match string) bool {
 	return false
 }
 
+// MatchesSpec reports whether p satisfies every set field of sel.
+func MatchesSpec(p Process, sel Selector) bool {
+	if sel.Exact == "" && sel.Contains == "" && sel.Pattern == nil {
+		return false
+	}
+	if sel.Exact != "" && !Matches(p, sel.Exact) {
+		return false
+	}
+	if sel.Contains != "" && !strings.Contains(p.Cmd, sel.Contains) {
+		return false
+	}
+	if sel.Pattern != nil && !sel.Pattern.MatchString(p.Cmd) {
+		return false
+	}
+	return true
+}
+
 // Matching returns processes in s that match, ordered by PID.
 func Matching(s Snapshot, match string) []Process {
+	return MatchingSpec(s, Selector{Exact: match})
+}
+
+// MatchingSpec returns processes in s that satisfy sel, ordered by PID.
+func MatchingSpec(s Snapshot, sel Selector) []Process {
 	var found []Process
 	for _, p := range s.Processes {
-		if Matches(p, match) {
+		if MatchesSpec(p, sel) {
 			found = append(found, p)
 		}
 	}
@@ -151,7 +226,12 @@ func Matching(s Snapshot, match string) []Process {
 
 // RootPIDs returns the PIDs of processes that match.
 func RootPIDs(s Snapshot, match string) []int {
-	found := Matching(s, match)
+	return RootPIDsSpec(s, Selector{Exact: match})
+}
+
+// RootPIDsSpec returns the PIDs of processes that satisfy sel.
+func RootPIDsSpec(s Snapshot, sel Selector) []int {
+	found := MatchingSpec(s, sel)
 	ids := make([]int, len(found))
 	for i, p := range found {
 		ids[i] = p.PID
@@ -160,6 +240,7 @@ func RootPIDs(s Snapshot, match string) []int {
 }
 
 // SignalOrder returns roots and their descendants, children before parents.
+// A restart therefore stops the app and the child processes it started.
 // A process is visited once. PID values below 1 are dropped.
 func SignalOrder(s Snapshot, roots []int) []int {
 	if len(roots) == 0 {

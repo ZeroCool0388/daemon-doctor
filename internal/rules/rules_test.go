@@ -47,6 +47,48 @@ func healthy() []checks.Outcome {
 	}
 }
 
+func TestMissingFlagsOffersRestart(t *testing.T) {
+	eng := NewEngine(func() time.Time { return time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC) })
+	p := plugin()
+	outcomes := []checks.Outcome{{
+		Type:         plugins.CheckLaunchedWithFlags,
+		Failed:       true,
+		MissingFlags: true,
+		Detail:       "Example Desktop App started without its required settings.",
+	}}
+	got := eng.Decide(p, outcomes)
+	if len(got.Alerts) != 1 {
+		t.Fatalf("%+v", got)
+	}
+	alert := got.Alerts[0]
+	if alert.Kind != KindMissingFlags || alert.Action != plugins.FixRestart || !alert.OfferFix {
+		t.Fatalf("%+v", alert)
+	}
+	if alert.Message != "Example Desktop App started without its required settings." {
+		t.Fatalf("message %q", alert.Message)
+	}
+}
+
+func TestLaunchdJobOffersKickstart(t *testing.T) {
+	eng := NewEngine(func() time.Time { return time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC) })
+	p := plugin()
+	p.Fixes[plugins.FixKickstart] = plugins.Fix{Kind: plugins.FixKickstart, Label: "com.example.health"}
+	delete(p.Fixes, plugins.FixRestart)
+	outcomes := []checks.Outcome{{
+		Type:      plugins.CheckLaunchdJob,
+		Failed:    true,
+		JobFailed: true,
+		Detail:    "Example Desktop App has not had a successful run in the last 10 minutes.",
+	}}
+	got := eng.Decide(p, outcomes)
+	if len(got.Alerts) != 1 || got.Alerts[0].Kind != KindLaunchd || got.Alerts[0].Action != plugins.FixKickstart {
+		t.Fatalf("%+v", got.Alerts)
+	}
+	if got.Alerts[0].Message != outcomes[0].Detail {
+		t.Fatalf("message %q", got.Alerts[0].Message)
+	}
+}
+
 func TestDownNeedsTwoChecksAndDoesNotRepeat(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	eng := NewEngine(func() time.Time { return now })

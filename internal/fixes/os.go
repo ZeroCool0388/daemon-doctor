@@ -24,9 +24,9 @@ func (OSController) Signal(pid int, sig syscall.Signal) error {
 	return err
 }
 
-// Launch starts path directly. It does not use a shell and it passes no arguments.
-func (OSController) Launch(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(ctx, path)
+// Launch starts path directly with args. It does not use a shell.
+func (OSController) Launch(ctx context.Context, path string, args []string) error {
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil

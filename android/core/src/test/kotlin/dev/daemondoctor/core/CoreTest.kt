@@ -86,6 +86,18 @@ class CoreTest {
     }
 
     @Test
+    fun kickstartStaysOnTheAllowlist() {
+        val page = """
+            {"events":[{"id":5,"kind":"alerts","body":{"alert_id":"cccccccccccccccccccccccccccccccc","service_id":"example-health","service_name":"Example Health","kind":"launchd_job","message":"Example Health has not had a successful run in the last 10 minutes.","actions":["launchctl_kickstart","launchctl kickstart -k gui/501/evil"],"process":""}}]}
+        """.trimIndent()
+        val alert = alertFromRelay(parseEvents(page).single().body, 1_700_000_000)
+        requireNotNull(alert)
+        assertEquals(listOf("launchctl_kickstart"), alert.actions)
+        assertEquals("launchctl_kickstart", fixIdFor(alert, AlertButton.Fix))
+        assertEquals(listOf(AlertButton.Fix, AlertButton.Ignore, AlertButton.Details), buttonsFor(alert))
+    }
+
+    @Test
     fun demoModeSignsWithoutCallingTheRelay() {
         val http = RecordingHttp()
         val session = Session(SoftwareSigner(ByteArray(32) { 7 }), http) { 1_700_000_000 }

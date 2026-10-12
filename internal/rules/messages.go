@@ -6,41 +6,65 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 )
 
-func templateFor(m plugins.Messages, kind string) string {
-	msg := ""
+func rawMessage(m plugins.Messages, kind string) string {
 	switch kind {
 	case KindDown:
-		msg = m.Down
+		return m.Down
 	case KindStuck:
-		msg = m.Stuck
+		return m.Stuck
+	case KindMissingFlags:
+		return m.MissingFlags
+	case KindLaunchd:
+		return m.LaunchdJob
 	case KindKeepsHappening:
-		msg = m.KeepsHappening
+		return m.KeepsHappening
 	case KindSleep:
-		msg = m.Sleep
+		return m.Sleep
 	case KindWake:
-		msg = m.Wake
+		return m.Wake
 	case KindNetworkDown:
-		msg = m.NetworkDown
+		return m.NetworkDown
 	case KindNetworkBack:
-		msg = m.NetworkBack
+		return m.NetworkBack
 	case KindDiskLow:
-		msg = m.DiskLow
+		return m.DiskLow
 	case KindCPUHog:
-		msg = m.CPUHog
+		return m.CPUHog
 	case KindMemoryHog:
-		msg = m.MemoryHog
+		return m.MemoryHog
 	case KindCPUHog + "_unwatched":
-		msg = m.CPUHogUnwatched
+		return m.CPUHogUnwatched
 	case KindMemoryHog + "_unwatched":
-		msg = m.MemoryHogUnwatched
+		return m.MemoryHogUnwatched
+	default:
+		return ""
 	}
+}
+
+func templateFor(m plugins.Messages, kind string) string {
+	msg := rawMessage(m, kind)
 	if msg == "" {
 		msg = defaultTemplate(kind)
 	}
 	return msg
+}
+
+func alertText(p plugins.Plugin, kind string, outcomes []checks.Outcome) string {
+	if custom := strings.TrimSpace(rawMessage(p.Messages, kind)); custom != "" {
+		return fill(custom, map[string]string{"name": p.Name})
+	}
+	if kind == KindMissingFlags || kind == KindLaunchd {
+		for _, outcome := range outcomes {
+			if outcome.Detail != "" && (outcome.MissingFlags || outcome.JobFailed) {
+				return outcome.Detail
+			}
+		}
+	}
+	return message(p, kind)
 }
 
 func defaultTemplate(kind string) string {
@@ -49,6 +73,10 @@ func defaultTemplate(kind string) string {
 		return "{name} has stopped. It is not running."
 	case KindStuck:
 		return "{name} is running but its health check is failing."
+	case KindMissingFlags:
+		return "{name} started without its required settings."
+	case KindLaunchd:
+		return "{name} has not had a successful run in the last window."
 	case KindKeepsHappening:
 		return "{name} has failed 3 times in the last hour. Automatic fixes are paused."
 	case KindSleep:

@@ -89,6 +89,53 @@ func TestAppendIsAppendOnlyAndBlanksSecrets(t *testing.T) {
 	}
 }
 
+func TestRotateAtSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	book, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book.SetMaxBytes(120)
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		if err := book.Append(Event{
+			Time:    start.Add(time.Duration(i) * time.Second),
+			Kind:    "check",
+			Message: "Example Desktop App is ok on this sample.",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backup) == 0 || len(current) == 0 {
+		t.Fatalf("backup %d current %d", len(backup), len(current))
+	}
+	if bytes.Contains(current, backup) {
+		t.Fatal("the rotated file was copied into the new log")
+	}
+	events, err := Read(path)
+	if err != nil || len(events) == 0 || events[0].Kind != "check" {
+		t.Fatalf("current log: %+v %v", events, err)
+	}
+	old, err := Read(path + ".1")
+	if err != nil || len(old) == 0 {
+		t.Fatalf("rotated log: %+v %v", old, err)
+	}
+	if !old[0].Time.Before(events[0].Time) {
+		t.Fatalf("rotation order old %s current %s", old[0].Time, events[0].Time)
+	}
+}
+
 func TestBlankLeavesPlainEnglish(t *testing.T) {
 	msg := "Example Desktop App is open but has no established outbound connection on port 443, so it looks stuck."
 	if Blank(msg) != msg {

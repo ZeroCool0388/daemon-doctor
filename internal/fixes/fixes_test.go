@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -46,10 +47,15 @@ func tree(ports ...int) sysprobe.Snapshot {
 	return s
 }
 
+type launchCall struct {
+	Path string
+	Args []string
+}
+
 type fakeCtrl struct {
 	sigs     []syscall.Signal
 	pids     []int
-	launches []string
+	launches []launchCall
 }
 
 func (f *fakeCtrl) Signal(pid int, sig syscall.Signal) error {
@@ -58,8 +64,8 @@ func (f *fakeCtrl) Signal(pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func (f *fakeCtrl) Launch(_ context.Context, path string) error {
-	f.launches = append(f.launches, path)
+func (f *fakeCtrl) Launch(_ context.Context, path string, args []string) error {
+	f.launches = append(f.launches, launchCall{Path: path, Args: append([]string(nil), args...)})
 	return nil
 }
 
@@ -113,8 +119,8 @@ func TestRestartAndForceRestartAreAllowlisted(t *testing.T) {
 	if len(ctrl.sigs) != 2 || ctrl.sigs[0] != syscall.SIGTERM {
 		t.Fatalf("signals: %v", ctrl.sigs)
 	}
-	if len(ctrl.launches) != 1 || ctrl.launches[0] != launch {
-		t.Fatalf("launches: %v", ctrl.launches)
+	if len(ctrl.launches) != 1 || ctrl.launches[0].Path != launch || len(ctrl.launches[0].Args) != 0 {
+		t.Fatalf("launches: %+v", ctrl.launches)
 	}
 
 	src = &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree()}}
@@ -183,6 +189,62 @@ func TestApplyStopMatchesTheExactName(t *testing.T) {
 	}
 }
 
+func TestKickstartDoesNotSignal(t *testing.T) {
+	p := plugin("")
+	p.Fixes[plugins.FixKickstart] = plugins.Fix{Kind: plugins.FixKickstart, Label: "com.example.health"}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(443), tree(443)}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	res, err := runner.Apply(context.Background(), p, plugins.FixKickstart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.sigs) != 0 {
+		t.Fatalf("kickstart signalled: pids %v sigs %v", ctrl.pids, ctrl.sigs)
+	}
+	if len(ctrl.launches) != 1 || ctrl.launches[0].Path != "launchctl" {
+		t.Fatalf("launch %+v", ctrl.launches)
+	}
+	want := []string{"kickstart", "-k", "gui/" + strconv.Itoa(os.Getuid()) + "/com.example.health"}
+	if strings.Join(ctrl.launches[0].Args, " ") != strings.Join(want, " ") {
+		t.Fatalf("args %v", ctrl.launches[0].Args)
+	}
+	if !res.Fixed || !strings.Contains(res.Detail, "launchctl kickstart -k") {
+		t.Fatalf("%+v", res)
+	}
+
+	dry := &recordingCtrl{}
+	runner.Control = dry
+	res, err = runner.Apply(context.Background(), p, plugins.FixKickstart, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dry.pids) != 0 || len(dry.launches) != 0 || !strings.Contains(res.Detail, "dry-run") {
+		t.Fatalf("dry %+v launches %+v", res, dry.launches)
+	}
+}
+
+func TestRestartPassesFixedArgs(t *testing.T) {
+	p := plugin("/opt/example-launch")
+	p.Fixes[plugins.FixRestart] = plugins.Fix{
+		Kind:     plugins.FixRestart,
+		Launcher: "/opt/example-launch",
+		Args:     []string{"--config", "/opt/example.yaml"},
+	}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree(443)}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	if _, err := runner.Apply(context.Background(), p, plugins.FixRestart, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.pids) != 2 || ctrl.pids[0] != 6 || ctrl.pids[1] != 4 {
+		t.Fatalf("children should be signalled first: %v", ctrl.pids)
+	}
+	if len(ctrl.launches) != 1 || strings.Join(ctrl.launches[0].Args, " ") != "--config /opt/example.yaml" {
+		t.Fatalf("%+v", ctrl.launches)
+	}
+}
+
 func TestUnknownFixIsNotExecuted(t *testing.T) {
 	ctrl := &recordingCtrl{}
 	src := &sysprobe.MemSource{}
@@ -233,7 +295,7 @@ func TestOSControllerRefusesPrivilegedPIDsAndLaunchesWithoutArgs(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "marker")
 	script := filepath.Join(dir, "launch-example")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$#\" > '" + marker + "'\n"
+	body := "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$*\" > '" + marker + "'\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -242,15 +304,27 @@ func TestOSControllerRefusesPrivilegedPIDsAndLaunchesWithoutArgs(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := ctrl.Launch(ctx, script); err != nil {
+	if err := ctrl.Launch(ctx, script, nil); err != nil {
 		t.Fatal(err)
 	}
+	waitMarker(t, marker, "0\n\n")
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.Launch(ctx, script, []string{"--fixed", "example"}); err != nil {
+		t.Fatal(err)
+	}
+	waitMarker(t, marker, "2\n--fixed example\n")
+}
+
+func waitMarker(t *testing.T, path, want string) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		data, err := os.ReadFile(marker)
+		data, err := os.ReadFile(path)
 		if err == nil {
-			if strings.TrimSpace(string(data)) != "0" {
-				t.Fatalf("launcher received arguments: %q", data)
+			if string(data) != want {
+				t.Fatalf("marker %q want %q", data, want)
 			}
 			return
 		}
