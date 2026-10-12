@@ -1,0 +1,28 @@
+{
+  "vectors": [
+    {
+      "name": "go-restart",
+      "produced_by": "go",
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "public_key_b64": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+      "mac_id": "0123456789abcdef0123456789abcdef",
+      "alert_id": "abcdef0123456789abcdef0123456789",
+      "fix_id": "restart",
+      "nonce": "00112233445566778899aabbccddeeff",
+      "expires_unix": 1700000000,
+      "signature_b64": "MUhJdv3sb4SYFKeHZAYThP5GmNfz6QJoAB0BMJ04ro_9aM1YVgd3Q6E67XUjmFg0aSSQYM_qS2T_s7FWRwKwBw"
+    },
+    {
+      "name": "jdk-stop",
+      "produced_by": "jdk",
+      "seed_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "public_key_b64": "T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ",
+      "mac_id": "fedcba9876543210fedcba9876543210",
+      "alert_id": "0123456789abcdef0123456789abcdef",
+      "fix_id": "stop",
+      "nonce": "ffeeddccbbaa99887766554433221100",
+      "expires_unix": 1700000600,
+      "signature_b64": "5JnhnlAL06TAoHU_bqQ0eyB7JVt0YbmQ8TiYjfRejkDrd4vjn1WOvyfTJd6cWwE6fCX3T9iJ1Z-xcmprR2UiAQ"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ type Event struct {
 	ServiceName string    `json:"service_name,omitempty"`
 	Status      string    `json:"status,omitempty"`
 	AlertKind   string    `json:"alert_kind,omitempty"`
+	AlertID     string    `json:"alert_id,omitempty"`
 	Message     string    `json:"message,omitempty"`
 	OfferFix    *bool     `json:"offer_fix,omitempty"`
 	Action      string    `json:"action,omitempty"`

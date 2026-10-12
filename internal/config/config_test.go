@@ -23,6 +23,9 @@ func TestLoadExample(t *testing.T) {
 	if cfg.LogPath != filepath.Clean("/tmp/daemon-doctor/events.jsonl") {
 		t.Fatalf("log path %s", cfg.LogPath)
 	}
+	if cfg.RelayURL != "" {
+		t.Fatalf("example relay URL %q", cfg.RelayURL)
+	}
 }
 
 func TestRejectsBadIntervalAndUnknownField(t *testing.T) {
@@ -39,5 +42,37 @@ func TestRejectsBadIntervalAndUnknownField(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected unknown field to be rejected")
+	}
+}
+
+func TestRelayURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay_url: https://relay.example.invalid/mailbox\nstate_dir: state\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RelayURL != "https://relay.example.invalid/mailbox" {
+		t.Fatalf("relay URL %q", cfg.RelayURL)
+	}
+	if cfg.StateDir != filepath.Join(dir, "state") {
+		t.Fatalf("state dir %s", cfg.StateDir)
+	}
+	for _, raw := range []string{
+		"relay_url: https://user:secret@relay.example.invalid\n",
+		"relay_url: file:///tmp/relay\n",
+		"relay_url: relay.example.invalid\n",
+	} {
+		text := "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\n" + raw
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("expected %s to be rejected", raw)
+		}
 	}
 }

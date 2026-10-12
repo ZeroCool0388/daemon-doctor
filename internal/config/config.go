@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,17 +15,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the on-disk program config. It holds paths only.
+// Config is the on-disk program config.
+// RelayURL is optional. An empty value keeps the program local.
 type Config struct {
 	PluginsDir string
 	LogPath    string
 	Interval   time.Duration
+	RelayURL   string
+	StateDir   string
 }
 
 type file struct {
 	PluginsDir string `yaml:"plugins_dir" toml:"plugins_dir"`
 	LogPath    string `yaml:"log_path" toml:"log_path"`
 	Interval   string `yaml:"interval" toml:"interval"`
+	RelayURL   string `yaml:"relay_url" toml:"relay_url"`
+	StateDir   string `yaml:"state_dir" toml:"state_dir"`
 }
 
 // Load reads a YAML or TOML config. Relative paths are resolved from the
@@ -81,11 +87,36 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	dir := filepath.Dir(base)
+	relayURL, err := cleanRelayURL(raw.RelayURL)
+	if err != nil {
+		return Config{}, err
+	}
+	stateDir := dir
+	if strings.TrimSpace(raw.StateDir) != "" {
+		stateDir = resolve(dir, raw.StateDir)
+	}
 	return Config{
 		PluginsDir: resolve(dir, raw.PluginsDir),
 		LogPath:    resolve(dir, raw.LogPath),
 		Interval:   interval,
+		RelayURL:   relayURL,
+		StateDir:   stateDir,
 	}, nil
+}
+
+func cleanRelayURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return "", fmt.Errorf("relay_url must be an http or https URL")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("relay_url must not include a user or password")
+	}
+	return u.String(), nil
 }
 
 func resolve(baseDir, path string) string {

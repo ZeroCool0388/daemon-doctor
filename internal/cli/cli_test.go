@@ -2,10 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 )
 
 func writeFixture(t *testing.T) string {
@@ -29,6 +34,24 @@ func writeFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestDemoPrintsScriptedAlerts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"daemon-doctor", "demo"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No Mac, no relay, and no phone.") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Needs a look: Example Mail.") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+	code = Run([]string{"daemon-doctor", "demo", "--config", "config.yaml"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d", code)
+	}
 }
 
 func TestStatusReportsMissingProcess(t *testing.T) {
@@ -148,5 +171,156 @@ func TestUnwatchedStopFlag(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Dry run") {
 		t.Fatalf("stdout %s", stdout.String())
+	}
+}
+
+func TestPairPrintsPayloadWithoutPrivateKey(t *testing.T) {
+	path := writeFixture(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"daemon-doctor", "pair", "--config", path}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "payload daemon-doctor:1:") || !strings.Contains(text, "\n") {
+		t.Fatalf("stdout: %s", text)
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "identity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	if file.PrivateKey == "" || strings.Contains(text, file.PrivateKey) {
+		t.Fatal("pair output contains the private key")
+	}
+	info, err := os.Stat(filepath.Join(filepath.Dir(path), "identity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("identity mode %o", info.Mode().Perm())
+	}
+
+	payload := strings.TrimPrefix(strings.Split(text, "\n")[0], "payload ")
+	_, pairingCode, _, _, err := security.ParsePayload(strings.TrimSpace(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := security.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.AcceptPairing(time.Now(), pairingCode, phone); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "pair", "--list", "--config", path}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list code %d stderr %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), security.Fingerprint(phone)) {
+		t.Fatalf("stdout %s", stdout.String())
+	}
+}
+
+func TestFixApprovalFile(t *testing.T) {
+	path := writeFixture(t)
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"daemon-doctor", "pair", "--config", path}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatal(stderr.String())
+	}
+	payload := strings.TrimPrefix(strings.Split(stdout.String(), "\n")[0], "payload ")
+	_, pairingCode, _, _, err := security.ParsePayload(strings.TrimSpace(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phonePub, phonePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := security.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := sec.AcceptPairing(now, pairingCode, phonePub); err != nil {
+		t.Fatal(err)
+	}
+	alertID := security.NewID()
+	if err := sec.RecordAlert(security.Raised{
+		ID:        alertID,
+		ServiceID: "example-desktop-app",
+		Actions:   []string{"restart"},
+		At:        now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	signed, err := security.Sign(phonePriv, security.Approval{
+		MacID:   sec.MacID(),
+		AlertID: alertID,
+		FixID:   "restart",
+		Nonce:   security.NewID(),
+		Expires: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := security.MarshalApproval(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalPath := filepath.Join(filepath.Dir(path), "approval.json")
+	if err := os.WriteFile(approvalPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"daemon-doctor", "fix", "--config", path, "--approval", approvalPath, "--service", "example-desktop-app"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--approval", approvalPath, "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "Dry run") {
+		t.Fatalf("code %d stdout %s stderr %s", code, stdout.String(), stderr.String())
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	obj["command"] = "touch marker"
+	smuggled, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker")
+	obj["command"] = "touch " + marker
+	smuggled, err = json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(approvalPath, smuggled, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"daemon-doctor", "fix", "--config", path, "--approval", approvalPath, "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("stdout %s", stdout.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("smuggled command created a file")
 	}
 }
