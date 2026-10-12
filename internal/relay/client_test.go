@@ -113,7 +113,7 @@ func TestPlaceholderWrangler(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.ToLower(string(data))
-	for _, forbidden := range []string{"account_id", "api_token", "api_key", "begin private key"} {
+	for _, forbidden := range []string{"account_id", "api_token", "api_key", "begin private key", "route", "zone_id", "https://"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("wrangler.toml contains %s", forbidden)
 		}

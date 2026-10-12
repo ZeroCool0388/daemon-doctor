@@ -11,6 +11,12 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/health") {
+      if (request.method !== "GET") {
+        return new Response("method not allowed", { status: 405, headers: { Allow: "GET" } });
+      }
+      return Response.json({ ok: true });
+    }
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts.length !== 4 || parts[0] !== "v1" || parts[1] !== "macs") {
       return new Response("not found", { status: 404 });

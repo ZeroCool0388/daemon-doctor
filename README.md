@@ -101,7 +101,7 @@ To stop it: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.example.d
 
 ### Relay
 
-The owner deploys the worker. This repo does not. `relay/wrangler.toml` has no account id, no API token, and no route. `workers_dev` is false. From `relay/`, after adding a route or a workers.dev name in a local copy that stays uncommitted:
+The owner deploys the worker. This repo does not. `relay/wrangler.toml` has no account id, no API token, and no route. `workers_dev` is true, so a free Cloudflare account can deploy it to its own workers.dev subdomain with no route or zone. From `relay/`:
 
 ```
 npm ci
@@ -109,7 +109,7 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-Put the resulting base URL in `relay_url` in `~/.config/daemon-doctor/config.yaml` only. Leave it out of the repo.
+`GET /health` on the deployed worker returns `{"ok":true}`. Put the resulting base URL in `relay_url` in `~/.config/daemon-doctor/config.yaml` only. Leave it out of the repo.
 
 ### Android sideload
 
