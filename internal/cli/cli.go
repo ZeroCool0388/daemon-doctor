@@ -16,6 +16,7 @@ import (
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
 	"github.com/ZeroCool0388/daemon-doctor/internal/config"
+	"github.com/ZeroCool0388/daemon-doctor/internal/demo"
 	"github.com/ZeroCool0388/daemon-doctor/internal/doctor"
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
@@ -46,6 +47,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fixCmd(args[2:], stdin, stdout, stderr)
 	case "pair":
 		return pairCmd(args[2:], stdout, stderr)
+	case "demo":
+		return demoCmd(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[1])
 		usage(stderr)
@@ -63,6 +66,7 @@ Usage:
   daemon-doctor fix --service id --action stop|restart|force-restart [--dry-run] [--yes] [--config path]
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
+  daemon-doctor demo
 
 status prints one check of each plug-in.
 run repeats checks on the configured interval until interrupted.
@@ -71,9 +75,22 @@ fix applies one allowlisted action after you answer y, then rechecks.
 fix --approval reads a signed phone approval. The signature is the approval.
 --process stop is only for a process named by an unwatched resource alert.
 --dry-run rechecks without signalling a process or launching anything.
+demo replays scripted incidents with fake services. It does not use a Mac, a relay, or a phone.
 
 The default config path is ~/.config/daemon-doctor/config.yaml.
 `)
+}
+
+func demoCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintf(stderr, "demo does not take arguments\n")
+		return 2
+	}
+	if err := demo.Run(stdout); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func statusCmd(args []string, stdout, stderr io.Writer) int {

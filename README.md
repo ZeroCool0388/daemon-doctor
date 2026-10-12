@@ -2,7 +2,7 @@
 
 Watches the apps and background services on a Mac, spots when one is down, stuck, or using the machine, explains it in plain English, and fixes it only after you approve. Fixed rules only: no AI in the decision or fix path.
 
-**Status:** Phase 3 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
+**Status:** Phase 5 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
 
 ## Problem
 
@@ -14,15 +14,28 @@ Someone who keeps helper apps running on a Mac and wants a local notice when one
 
 ## Demo
 
-_TBD (demo GIF)._
+A GIF is not in this repo.
+
+The terminal recording is [docs/demo.cast](docs/demo.cast). It was made with asciinema 2.4.0 by running the built `daemon-doctor demo` command. Play it with `asciinema play docs/demo.cast`. The cast is that command's stdout. It is not a screen recording of the Android app.
 
 ## Live demo or replay
 
-_TBD (scripted replay)._
+`daemon-doctor demo` replays four scripted incidents with fake services. It does not read the host, open a relay, or use a phone. The incidents are an app that is stuck and then force-restarted, a network drop and recovery that names only the service that stayed down, a CPU hog that is stopped, and a service that fails three times so fixes are no longer offered.
+
+```
+go build -o daemon-doctor ./cmd/daemon-doctor
+./daemon-doctor demo
+```
+
+No config file is required. The clock in the script jumps forward so the 5-minute CPU rule finishes without waiting.
 
 ## Architecture
 
-The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed. Push to a phone is an interface with a no-network stub and no keys.
+The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed from this repo. The Mac push hook is an interface with a no-network stub and no keys.
+
+`android/` is a Kotlin and Jetpack Compose app. It pairs by reading the Mac's QR payload with CameraX and the on-device ML Kit barcode scanner, or by pasting that text when there is no camera. It generates an Ed25519 key in the Android Keystore when that algorithm is available, and otherwise keeps a 32-byte seed in the app's private files. It registers the public key with the relay. Alerts, a status row per service, and alert history are on screen. Fix it, Stop, Ignore, and Details use the allowlist the Mac already offered. Fix it prefers `restart`, then `force-restart`. Stop is offered only when the alert includes `stop`. Ignore stays on the phone. A signed approval is posted only when demo mode is off. The signed text matches the Mac verifier: `daemon-doctor/approval/v1`, then `mac_id`, `alert_id`, `fix_id`, `nonce`, and `expires_unix`. `testdata/approval-vectors.json` holds one fixture produced by Go and one produced by the JDK. Go re-signs its own fixture and only verifies the JDK fixture. The Kotlin tests re-sign both.
+
+Firebase Cloud Messaging is behind `PushHub`. The app polls the mailbox every 15 seconds while the process is running. That interval is the value in the app. `google-services.json` is gitignored. `android/google-services.json.example` is a placeholder. The debug APK builds without that file. Demo mode is the default and uses fictional alerts, so the APK does not need a relay.
 
 ```mermaid
 flowchart LR
@@ -36,6 +49,8 @@ flowchart LR
   end
   R -- outbound --> W[Relay mailbox]
   W -- stored approval --> V
+  Ph[Android app] -- signed approval --> W
+  W -- alert page --> Ph
 ```
 
 Plug-ins are YAML or TOML files. A service plug-in names a process, lists checks cheapest first, stores plain-English messages, and approves `stop`, `restart`, or `force-restart`. `plugins/this-mac.yaml` is the host plug-in: sleep or wake, network, free disk space, memory pressure, and CPU. It does not name a process and it has no fixes. The other shipped plug-ins are a generic AI desktop app, Codex, ChatGPT, a local gateway, Proton Mail Bridge, Syncthing, Screen Sharing, and the fictional `example-desktop-app`. Process names are the `process.match` field in each file.
@@ -47,7 +62,7 @@ Rules:
 - **Down:** the process is missing on 2 checks in a row. The alert offers `restart` when that action is approved.
 - **Running but stuck:** the process is up, and a health check has failed. The built-in health check counts established outbound TCP connections in the process tree and fails when that count stays at zero for N checks in a row. The alert offers `force-restart` when that action is approved.
 - **Sleep or wake:** a transition raises one alert. The first awake sample does not. While the Mac is asleep, service checks are skipped.
-- **Network down:** no IPv4 default route. Other alerts pause. When the route returns, every plug-in is checked again and one summary is sent. The summary counts every loaded plug-in, including This Mac.
+- **Network down:** no IPv4 default route. Other alerts pause. When the route returns, every plug-in is checked again and one summary is sent. The summary counts every loaded plug-in, including This Mac. Services that are not healthy are named on that summary.
 - **Low disk:** free space below `min_free_percent`. The shipped file uses 10. Exactly that percent does not alert. No fix is offered.
 - **CPU and memory:** a share of the machine at or above the threshold, or memory pressure at or above the configured level, for the configured duration. Both default to 5 minutes when a file omits the duration, and CPU defaults to 85 when a file omits the percent. The shipped file sets 85 and 5m. A sample under the line resets the window. The alert names the highest CPU process, or the largest memory user. A watched service is offered `stop` and `restart` only when those actions are on its allowlist. Any other process is offered `stop` only. A hog does not count toward keeps-happening.
 - The same condition does not raise a second alert.
@@ -61,8 +76,52 @@ An approval is signed by a paired phone key. The signed text is the Mac id, aler
 
 Checks, alerts, and fixes are appended to a local JSON-lines file. Values that look like tokens, passwords, or private keys are replaced with `[blanked]`.
 
+## Install
+
+### macOS
+
+Build the program and keep the real config outside the repo:
+
 ```
 go build -o daemon-doctor ./cmd/daemon-doctor
+mkdir -p ~/.config/daemon-doctor
+cp config.example.yaml ~/.config/daemon-doctor/config.yaml
+```
+
+Edit that copy. `config.example.yaml` leaves `relay_url` unset, so the program stays local until you set one there. `launchd/com.example.daemon-doctor.plist` is an example LaunchAgent. Replace `/path/to/daemon-doctor` and `/path/to/config.yaml`, then load it as the normal user:
+
+```
+cp launchd/com.example.daemon-doctor.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.daemon-doctor.plist
+```
+
+To stop it: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.example.daemon-doctor.plist`. The plist does not set a user and it is not for root. `launchd/com.example.local-gateway.plist` is a separate example for a helper program, with placeholder paths.
+
+### Relay
+
+The owner deploys the worker. This repo does not. `relay/wrangler.toml` has no account id, no API token, and no route. `workers_dev` is false. From `relay/`, after adding a route or a workers.dev name in a local copy that stays uncommitted:
+
+```
+npm ci
+npx wrangler login
+npx wrangler deploy
+```
+
+Put the resulting base URL in `relay_url` in `~/.config/daemon-doctor/config.yaml` only. Leave it out of the repo.
+
+### Android sideload
+
+From `android/`:
+
+```
+./gradlew :app:assembleDebug
+```
+
+The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Install it with `adb install -r` on that file, or copy it to the phone and open it there. The phone has to allow install of that file. The app starts in demo mode, so it does not need `google-services.json` or a relay. To turn on Firebase later, copy `android/google-services.json.example` to `android/app/google-services.json` and replace the placeholders with the owner's Firebase project. That copy is gitignored.
+
+```
+go build -o daemon-doctor ./cmd/daemon-doctor
+daemon-doctor demo
 daemon-doctor status --config config.example.yaml
 daemon-doctor run --config config.example.yaml
 daemon-doctor pair --config config.example.yaml
@@ -71,41 +130,79 @@ daemon-doctor fix --process ExampleTool --action stop --dry-run --config config.
 daemon-doctor fix --approval approval.json --dry-run --config config.example.yaml
 ```
 
-`config.example.yaml` is a placeholder. `relay_url` is left unset there, so those commands stay local. The real config belongs in `~/.config/daemon-doctor/config.yaml` and is gitignored. `launchd/com.example.daemon-doctor.plist` and `launchd/com.example.local-gateway.plist` are example LaunchAgents with placeholder paths. Load them as the normal user.
-
-Relay tests use Miniflare through Vitest. `relay/wrangler.toml` is a placeholder with no account id and no API token.
-
 ## Test results
 
-Measured on Linux with Go 1.25.14 (`go version go1.25.14 linux/amd64`).
+Counts below are copied from GitHub Actions run [38186522355](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38186522355) (push of `b3902cf` on `cursor/phase-5-demo-readme-f670`, 2026-10-12, conclusion success). The pull request run [38186524731](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38186524731) on the same commit also succeeded. Go on that runner was 1.25.14, image ubuntu-24.04.
 
-`go test -count=1 ./...`:
+The `go test summary` step printed these lines from `go test -count=1 -json ./...`:
 
 ```
-?   	github.com/ZeroCool0388/daemon-doctor/cmd/daemon-doctor	[no test files]
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.013s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.107s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/config	0.009s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.172s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.018s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.014s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.007s
-?   	github.com/ZeroCool0388/daemon-doctor/internal/push	[no test files]
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.006s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.006s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/security	0.009s
-ok  	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.013s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/config	0.004s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/demo	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.241s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.014s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.006s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.144s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.005s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.007s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/security	0.008s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.04s
+pass events with a test name: 111
+subtests: 26
 ```
 
-A following `go test -count=1 -json ./...` emitted 106 pass events that include a test name. 24 of those names are subtests. The package times above are from the first command. They are not a latency target.
+The elapsed figures are the package times from that JSON run. The step exits on a fail event; this log has none.
 
-A separate `npm test` in `relay/` (Vitest 4.1.11) reported 8 passed tests. Vitest printed a duration of 1.53s for that run. That figure is the test runner's own total, not a relay latency.
+Relay `npm test` printed this Vitest summary. The duration is the runner total.
 
-## Cost and latency
+```
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  00:03:03
+   Duration  1.35s (transform 41ms, setup 0ms, import 69ms, tests 65ms, environment 0ms)
+```
 
-Not measured.
+The Android job printed:
 
-The worker is not deployed, and the push hook does not call a network. Failure-to-alert time and tap-to-fixed time are not measured. The program's own CPU and memory use is not measured.
+```
+android unit tests: 10 failures=0 errors=0 skipped=0
+```
+
+Gradle printed `BUILD SUCCESSFUL in 2m 9s`. The job uploaded the `debug-apk` artifact (id 11719792059, zip size 24572514 bytes).
+
+## Cost
+
+£0.
+
+Nothing in this repo is deployed, and the repo holds no account id, API token, or Firebase project. The Go program and the demo have no license fee. GitHub Actions runs the tests on the public repository. The debug APK is sideloaded, so there is no store fee. The relay is written for the Workers free plan and is not deployed from here, so there is no Cloudflare invoice. FCM is unwired unless the owner adds a gitignored `google-services.json`. There is no bill to report for this project.
+
+## Latency
+
+Measured locally with Go 1.25.14 (`go version go1.25.14 linux/amd64`) on Linux amd64. `go test` printed `cpu: Intel(R) Xeon(R) Processor`.
+
+Check loop, one untimed `doctor.Cycle` and then the timed loop. Each operation is one cycle on the demo's healthy fake snapshot. The 30 second run interval is not included.
+
+```
+go test -bench=BenchmarkCheckCycle -benchtime=1s -count=1 ./internal/demo
+```
+
+```
+BenchmarkCheckCycle-4   	  188745	      6409 ns/op
+```
+
+Approval verification, one untimed `Store.Consume` and then the timed loop. Each operation signs a new approval and calls `Store.Consume`, which checks the signature, the paired key, the alert, the fix, the expiry, and appends the nonce.
+
+```
+go test -bench=BenchmarkApprovalVerify -benchtime=1s -count=1 ./internal/security
+```
+
+```
+BenchmarkApprovalVerify-4   	   19520	     61556 ns/op
+```
+
+Those two lines are the benchmark tool's output for that run. Time from a failure to a phone, and time from a tap to a finished fix, are not measured.
 
 ## Limits and next steps
 
@@ -119,10 +216,13 @@ The worker is not deployed, and the push hook does not call a network. Failure-t
 - A local `y` still approves a fix typed on this machine. A phone approval is a separate signed message.
 - The relay sees the one-time pairing code when the phone registers. A hostile relay can substitute a phone key on that first registration. After a key is stored, the Mac rejects forged, replayed, expired, altered, and unknown-key approvals without running a fix.
 - Alert text is not encrypted. The mailbox can read the short alert it stores.
-- The phone app is not built. Push delivery is a stub.
-- Demo mode is not built.
+- The phone keeps its paired Mac id in app-private preferences. The one-time pairing code is stored with that payload. The private key is not.
+- Camera scanning and Android Keystore signing were not run on a device. The unit tests use the software signer. `selectBackend` chooses the keystore path only when Ed25519 key generation succeeds; any failure uses the app-private seed.
+- Without `google-services.json`, Firebase is not configured and the app relies on polling while its process is running. A push does not arrive in that build.
+- The Android screens were not opened on a device. The terminal demo is covered by a unit test. A GIF was not produced.
+- An iPhone app is later.
 
-Next is the Android app, then demo mode.
+Next is device testing of the Android app. An iPhone app comes after that.
 
 ## License
 

@@ -18,7 +18,29 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test
-        run: go test ./...
+        run: go test -count=1 -json ./... > "$RUNNER_TEMP/gotest.json"
+      - name: go test summary
+        run: |
+          python3 - << 'PY'
+          import json, os, sys
+          path = os.environ["RUNNER_TEMP"] + "/gotest.json"
+          passes = []
+          fails = 0
+          for line in open(path):
+              ev = json.loads(line)
+              action = ev.get("Action")
+              if action == "fail":
+                  fails += 1
+                  print("FAIL", ev.get("Package"), ev.get("Test", ""))
+              if action == "pass" and ev.get("Test"):
+                  passes.append(ev["Test"])
+              if action == "pass" and not ev.get("Test"):
+                  print("ok\t%s\t%ss" % (ev.get("Package"), ev.get("Elapsed")))
+          subtests = sum(1 for name in passes if "/" in name)
+          print("pass events with a test name: %d" % len(passes))
+          print("subtests: %d" % subtests)
+          sys.exit(1 if fails else 0)
+          PY
 
   relay:
     name: relay tests
@@ -37,3 +59,40 @@ jobs:
         run: npm ci
       - name: npm test
         run: npm test
+
+  android:
+    name: android build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platforms;android-35 build-tools;35.0.0
+      - name: Gradle build and unit tests
+        working-directory: android
+        run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
+      - name: Count Android unit tests
+        run: |
+          python3 - << 'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          total = fails = errors = skipped = 0
+          for path in sorted(glob.glob("android/**/TEST-*.xml", recursive=True)):
+              root = ET.parse(path).getroot()
+              tests = int(root.attrib.get("tests", 0))
+              total += tests
+              fails += int(root.attrib.get("failures", 0))
+              errors += int(root.attrib.get("errors", 0))
+              skipped += int(root.attrib.get("skipped", 0))
+              print("%s tests=%s" % (path, tests))
+          print("android unit tests: %d failures=%d errors=%d skipped=%d" % (total, fails, errors, skipped))
+          sys.exit(1 if fails or errors else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

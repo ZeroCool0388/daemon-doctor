@@ -36,6 +36,24 @@ func writeFixture(t *testing.T) string {
 	return path
 }
 
+func TestDemoPrintsScriptedAlerts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"daemon-doctor", "demo"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code %d stderr %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No Mac, no relay, and no phone.") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Needs a look: Example Mail.") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+	code = Run([]string{"daemon-doctor", "demo", "--config", "config.yaml"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d", code)
+	}
+}
+
 func TestStatusReportsMissingProcess(t *testing.T) {
 	path := writeFixture(t)
 	var stdout, stderr bytes.Buffer
