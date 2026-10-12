@@ -234,19 +234,42 @@ func statFiles(paths []string) map[string]FileStamp {
 	return out
 }
 
+// GUIServiceTarget is the launchctl service name for label in this user's
+// gui domain. The uid is read at runtime. label is one argument and may
+// contain spaces; the caller does not pass it through a shell.
+func GUIServiceTarget(label string) string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
+}
+
 func readLaunchdJobs(ctx context.Context, labels []string) map[string]LaunchdJob {
 	out := make(map[string]LaunchdJob, len(labels))
-	uid := os.Getuid()
 	for _, label := range labels {
-		target := fmt.Sprintf("gui/%d/%s", uid, label)
-		text, ok := commandOutput(ctx, hostReadTimeout, "launchctl", "print", target)
+		text, ok := commandOutput(ctx, hostReadTimeout, "launchctl", "print", GUIServiceTarget(label))
 		if !ok {
 			continue
 		}
 		job, found := ParseLaunchctlPrint(text)
-		if found {
-			out[label] = job
+		if !found {
+			continue
 		}
+		out[label] = stampStdout(job)
 	}
 	return out
+}
+
+func stampStdout(job LaunchdJob) LaunchdJob {
+	if job.StdoutPath == "" {
+		return job
+	}
+	info, err := os.Stat(job.StdoutPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			job.StdoutKnown = true
+			job.StdoutMissing = true
+		}
+		return job
+	}
+	job.StdoutKnown = true
+	job.StdoutMod = info.ModTime()
+	return job
 }

@@ -39,12 +39,23 @@ type Host struct {
 	MemoryPressure      string // normal, warn, or critical
 }
 
-// LaunchdJob is the last exit of one launchd label.
+// LaunchdJob is one launchd label as printed by launchctl.
+// Real print output has the last exit code, the runs count, and the run
+// interval. It does not include a last exit time. StdoutPath is the
+// StandardOutPath printed as "stdout path".
 type LaunchdJob struct {
-	ExitCode     int
-	ExitKnown    bool
-	LastRun      time.Time
-	LastRunKnown bool
+	ExitCode      int
+	ExitKnown     bool
+	LastRun       time.Time
+	LastRunKnown  bool
+	Runs          int
+	RunsKnown     bool
+	Interval      time.Duration
+	IntervalKnown bool
+	StdoutPath    string
+	StdoutMod     time.Time
+	StdoutKnown   bool
+	StdoutMissing bool
 }
 
 // FileStamp is the modification time of one configured path.

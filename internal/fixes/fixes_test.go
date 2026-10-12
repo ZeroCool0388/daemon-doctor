@@ -224,6 +224,25 @@ func TestKickstartDoesNotSignal(t *testing.T) {
 	}
 }
 
+func TestKickstartLabelKeepsSpaces(t *testing.T) {
+	p := plugin("")
+	p.Fixes[plugins.FixKickstart] = plugins.Fix{Kind: plugins.FixKickstart, Label: "Example Health"}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(443), tree(443)}}
+	ctrl := &recordingCtrl{}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	if _, err := runner.Apply(context.Background(), p, plugins.FixKickstart, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrl.launches) != 1 {
+		t.Fatalf("launches %+v", ctrl.launches)
+	}
+	args := ctrl.launches[0].Args
+	want := sysprobe.GUIServiceTarget("Example Health")
+	if len(args) != 3 || args[0] != "kickstart" || args[1] != "-k" || args[2] != want {
+		t.Fatalf("args %q", args)
+	}
+}
+
 func TestRestartPassesFixedArgs(t *testing.T) {
 	p := plugin("/opt/example-launch")
 	p.Fixes[plugins.FixRestart] = plugins.Fix{

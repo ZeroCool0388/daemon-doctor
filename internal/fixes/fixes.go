@@ -171,7 +171,7 @@ func ValidProcessName(name string) error {
 }
 
 func (r *Runner) applyKickstart(ctx context.Context, p plugins.Plugin, fix plugins.Fix, dryRun bool, start time.Time) (Result, error) {
-	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), fix.Label)
+	target := sysprobe.GUIServiceTarget(fix.Label)
 	args := []string{"kickstart", "-k", target}
 	res := Result{
 		Action:     plugins.FixKickstart,

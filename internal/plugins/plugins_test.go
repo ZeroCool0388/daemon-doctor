@@ -257,10 +257,39 @@ func TestCommandMatchAndNewChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	jobOnly := Plugin{
+		ID:     "example-health",
+		Name:   "Example Health",
+		Checks: []Check{{Type: CheckLaunchdJob, Label: "Example Health"}},
+		Fixes:  map[string]Fix{FixKickstart: {Kind: FixKickstart, Label: "Example Health"}},
+	}
+	if err := Validate(&jobOnly, BuiltinCosts()); err != nil {
+		t.Fatal(err)
+	}
+	if jobOnly.Checks[0].Label != "Example Health" || jobOnly.Fixes[FixKickstart].Label != "Example Health" {
+		t.Fatalf("%+v", jobOnly)
+	}
+	fileOnly := Plugin{
+		ID:     "example-heartbeat",
+		Name:   "Example Heartbeat",
+		Checks: []Check{{Type: CheckFileRecent, Path: "/tmp/example-heartbeat", MaxAge: "5m"}},
+	}
+	if err := Validate(&fileOnly, BuiltinCosts()); err != nil {
+		t.Fatal(err)
+	}
+	bare := Plugin{
+		ID:     "example-health",
+		Name:   "Example Health",
+		Checks: []Check{{Type: CheckOutboundTCP, Port: 443, Consecutive: 2}},
+	}
+	if err := Validate(&bare, BuiltinCosts()); err == nil || !strings.Contains(err.Error(), "process match") {
+		t.Fatalf("bare service: %v", err)
+	}
+
 	bad := []Plugin{
 		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{CmdRegex: "("}, Checks: []Check{{Type: CheckProcessRunning}}},
 		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckLaunchdJob, Label: "com.example.health", MaxAge: "10m"}, {Type: CheckProcessRunning}}},
-		{ID: "example-health", Name: "Example Health", Process: ProcessMatch{CmdContains: "example-health"}, Checks: []Check{{Type: CheckLaunchdJob, Label: "not a label", MaxAge: "10m"}}},
+		{ID: "example-health", Name: "Example Health", Process: ProcessMatch{CmdContains: "example-health"}, Checks: []Check{{Type: CheckLaunchdJob, Label: "com.example/health", MaxAge: "10m"}}},
 		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckProcessRunning}}, Fixes: map[string]Fix{FixKickstart: {Kind: FixKickstart, Label: "com.example.health", Launcher: "/bin/launchctl"}}},
 		{ID: "example-gateway", Name: "Example Gateway", Process: ProcessMatch{Match: "node"}, Checks: []Check{{Type: CheckProcessRunning}}, Fixes: map[string]Fix{FixRestart: {Kind: FixRestart, Args: []string{"--config"}}}},
 	}
