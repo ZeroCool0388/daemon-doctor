@@ -99,7 +99,7 @@ The supplied plug-ins are starting points: configure launchers before relying on
 | Low disk | Reports the condition without offering a fix. |
 | Repeated failures | Three incidents in an hour stop phone fix offers. |
 
-Thresholds live in the plug-in files. Each fix is re-checked, logged locally and reported to the relay's `results` mailbox.
+Thresholds live in the plug-in files. Fixes are re-checked and logged locally. The signed-approval path also attempts to post outcomes to the relay's `results` mailbox when a relay is configured; ordinary local CLI fixes report outcomes in the terminal and local log.
 
 ### Pairing and approval trust
 
@@ -107,7 +107,7 @@ First pairing trusts the version 2 QR shown by the local Mac and the phone that 
 
 The phone sends its public key, a pairing id (SHA-256 of the secret), and an HMAC-SHA256 proof. The proof binds the Mac id, Mac public key, pairing id and phone public key. **The QR secret never goes through the relay.** The Mac checks the proof and local expiry before storing the key, so the relay cannot substitute its own key without knowing the secret. The secret registers one key; delivery of that same registration can be repeated safely.
 
-Every subsequent fix needs an Ed25519 approval signed by a paired phone. The Mac checks that:
+Phone-approved fixes need an Ed25519 approval signed by a paired phone. Local fixes accept terminal confirmation or `--yes` without a phone signature. For a phone approval, the Mac checks that:
 
 1. the signature matches a trusted phone key and the approval names this Mac;
 2. the alert was raised locally and offered that exact fix;
