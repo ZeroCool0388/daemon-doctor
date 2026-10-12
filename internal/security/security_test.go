@@ -256,6 +256,63 @@ func TestApprovalJSONRejectsExtraFields(t *testing.T) {
 	}
 }
 
+func BenchmarkApprovalVerify(b *testing.B) {
+	dir := b.TempDir()
+	mac, err := LoadOrCreate(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	payload, err := mac.BeginPairing(now, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+	_, code, _, _, err := ParsePayload(payload)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := mac.AcceptPairing(now, code, pub); err != nil {
+		b.Fatal(err)
+	}
+	alertID := NewID()
+	if err := mac.RecordAlert(Raised{
+		ID:        alertID,
+		ServiceID: "example-desktop-app",
+		Actions:   []string{"restart"},
+		At:        now,
+	}); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := mac.Consume(now, signBench(b, priv, mac.MacID(), alertID, now.Add(ApprovalTTL))); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := mac.Consume(now, signBench(b, priv, mac.MacID(), alertID, now.Add(ApprovalTTL))); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func signBench(b *testing.B, phone ed25519.PrivateKey, macID, alertID string, expires time.Time) Approval {
+	b.Helper()
+	signed, err := Sign(phone, Approval{
+		MacID:   macID,
+		AlertID: alertID,
+		FixID:   "restart",
+		Nonce:   NewID(),
+		Expires: expires,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	return signed
+}
+
 func paired(t *testing.T, dir string) (*Store, ed25519.PrivateKey) {
 	t.Helper()
 	mac, err := LoadOrCreate(dir)
