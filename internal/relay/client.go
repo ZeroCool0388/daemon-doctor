@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,11 @@ type page struct {
 	Events []Event `json:"events"`
 }
 
+const maxBody = 4096 // Matches relay/src/mailbox.ts.
+const maxResponse = 1 << 20
+
+var macIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
 // Client talks to one relay base URL.
 type Client struct {
 	BaseURL string
@@ -42,21 +48,27 @@ type Client struct {
 func New(baseURL string) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(baseURL)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
-		return nil, fmt.Errorf("relay URL must be http or https and must not include a password")
+	if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return nil, fmt.Errorf("relay URL must be an http or https origin without user info, path, query, or fragment")
 	}
 	return &Client{
 		BaseURL: baseURL,
-		HTTP:    &http.Client{Timeout: 15 * time.Second},
+		HTTP:    &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		after:   map[string]int64{},
 	}, nil
 }
 
 // Post sends one JSON object into a mailbox. The body is stored, not run.
 func (c *Client) Post(ctx context.Context, macID, kind string, body any) error {
+	if err := mailboxOK(macID, kind); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxBody || len(raw) == 0 || raw[0] != '{' {
+		return fmt.Errorf("relay body must be a JSON object of at most %d bytes", maxBody)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(macID, kind), bytes.NewReader(raw))
 	if err != nil {
@@ -71,14 +83,26 @@ func (c *Client) Post(ctx context.Context, macID, kind string, body any) error {
 	if res.StatusCode != http.StatusOK {
 		return statusError(res)
 	}
+	var ack struct {
+		Stored bool `json:"stored"`
+	}
+	if err := readJSON(res.Body, &ack); err != nil {
+		return err
+	}
+	if !ack.Stored {
+		return fmt.Errorf("relay did not store the message")
+	}
 	return nil
 }
 
 // Poll reads new events of one kind. The cursor stays on this client.
 func (c *Client) Poll(ctx context.Context, macID, kind string) ([]Event, error) {
+	if err := mailboxOK(macID, kind); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	after := c.after[macID+"/"+kind]
-	c.mu.Unlock()
 	endpoint := fmt.Sprintf("%s?after=%d", c.url(macID, kind), after)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -93,23 +117,57 @@ func (c *Client) Poll(ctx context.Context, macID, kind string) ([]Event, error) 
 		return nil, statusError(res)
 	}
 	var payload page
-	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("relay response: %w", err)
+	if err := readJSON(res.Body, &payload); err != nil {
+		return nil, err
 	}
-	var maxID int64
+	if payload.Events == nil {
+		return nil, fmt.Errorf("relay response must contain an events array")
+	}
+	maxID := after
+	var events []Event
 	for _, event := range payload.Events {
-		if event.ID > maxID {
-			maxID = event.ID
+		if event.Kind != kind || event.ID <= 0 || len(event.Body) == 0 || event.Body[0] != '{' {
+			return nil, fmt.Errorf("relay response contains an invalid mailbox event")
 		}
+		if event.ID <= after {
+			continue
+		}
+		if event.ID <= maxID {
+			return nil, fmt.Errorf("relay events must be ordered by id")
+		}
+		maxID = event.ID
+		events = append(events, event)
 	}
 	if maxID > after {
-		c.mu.Lock()
-		if maxID > c.after[macID+"/"+kind] {
-			c.after[macID+"/"+kind] = maxID
-		}
-		c.mu.Unlock()
+		c.after[macID+"/"+kind] = maxID
 	}
-	return payload.Events, nil
+	return events, nil
+}
+
+func mailboxOK(macID, kind string) error {
+	if !macIDPattern.MatchString(macID) {
+		return fmt.Errorf("relay requires a 32-character lowercase hex Mac id")
+	}
+	switch kind {
+	case "pairing", "alerts", "approvals", "results":
+		return nil
+	default:
+		return fmt.Errorf("unknown relay mailbox %q", kind)
+	}
+}
+
+func readJSON(r io.Reader, dst any) error {
+	raw, err := io.ReadAll(io.LimitReader(r, maxResponse+1))
+	if err != nil {
+		return fmt.Errorf("relay response: %w", err)
+	}
+	if len(raw) > maxResponse {
+		return fmt.Errorf("relay response is too large")
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("relay response: %w", err)
+	}
+	return nil
 }
 
 // Watch opens an outbound WebSocket and calls onEvent for each text frame.

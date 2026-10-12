@@ -4,12 +4,12 @@ _Neutral project plan. All examples are synthetic._
 
 **In one line:** a small program on a Mac that watches the apps and background services you rely on. It notices when one is down, stuck, or hogging the machine, tells your phone in plain English, and fixes it only when you tap "Fix it".
 
-No AI anywhere: just fixed rules. Zero running cost.
+Detection and fixes use fixed rules. Zero running cost.
 
 ---
 
 ## 1. The problem
-An always-on Mac running helper apps (sync tools, mail bridges, AI desktop apps, scheduled jobs) fails quietly. An app can look open but have lost its link. The Mac never slept, the network was fine, yet the app stopped answering. You only find out hours later, when you need it. Then you have to work out the cause by hand from power logs, process lists and network status.
+An always-on Mac running helper apps (sync tools, mail bridges, desktop apps, scheduled jobs) fails quietly. An app can look open but have lost its link. The Mac never slept, the network was fine, yet the app stopped answering. You only find out hours later, when you need it. Then you have to work out the cause by hand from power logs, process lists and network status.
 
 Daemon Doctor does that checking for you, all the time, and explains what it found.
 
@@ -19,14 +19,13 @@ Daemon Doctor does that checking for you, all the time, and explains what it fou
 - Builds one small file with nothing else to install, so it's easy to start at login.
 - Simple to read, so others can follow the code in a public repo.
 - Good built-in tools for running checks on a timer, web connections and signatures.
-- Codex writes solid Go.
 - Rust would be slightly leaner, but it's slower to build and harder to review. That's not worth it for a program that mostly waits and runs small checks.
 
 ### Relay (the go-between for the Mac and phone): **Cloudflare Worker**
 A "Worker" is a tiny program Cloudflare runs for you on its servers.
 - The free plan covers this easily: about 100,000 requests a day, and we'd use a few hundred.
 - It never goes to sleep. Supabase's free projects pause after a week with no activity, which is the wrong trait for an alert system.
-- It can hold an always-open link to the Mac (a "WebSocket", a connection that stays open both ways) using a free Durable Object. That's Cloudflare's small stateful helper.
+- It stores alerts and approvals in a free Durable Object. The Mac polls the mailbox over HTTPS every five seconds.
 - It can send phone pushes through Firebase Cloud Messaging (FCM, Google's free push service).
 - The relay is "dumb on purpose". It only passes messages along and can't make the Mac do anything (see the security model).
 
@@ -70,9 +69,9 @@ Each plug-in lists:
 
 Example (shortened):
 ```yaml
-id: ai-desktop-app
-name: Example AI Desktop App
-process: "/Applications/an AI desktop app.app/Contents/MacOS/an AI desktop app"
+id: desktop-app
+name: Example Desktop App
+process: "/Applications/a desktop app.app/Contents/MacOS/a desktop app"
 checks:
   - type: process_running
   - type: launched_with_flags
@@ -81,13 +80,13 @@ checks:
     source: app_connection_status   # exact signal confirmed in Phase 1
     stale_after: 5m
 fixes:
-  restart: { kind: quit_and_launch, launcher: "~/bin/ai-desktop-app-launch.sh" }
-  force_restart: { kind: kill_and_launch, launcher: "~/bin/ai-desktop-app-launch.sh" }
+  restart: { kind: quit_and_launch, launcher: "~/bin/desktop-app-launch.sh" }
+  force_restart: { kind: kill_and_launch, launcher: "~/bin/desktop-app-launch.sh" }
 messages:
-  stuck: "An AI desktop app is open but has stopped answering for {mins} minutes. The Mac and network are fine."
+  stuck: "A desktop app is open but has stopped answering for {mins} minutes. The Mac and network are fine."
 ```
 
-**Starter plug-ins:** an AI desktop app, Codex, a local AI gateway (plus its scheduled health job), a mail bridge, Syncthing, Screen Sharing, and "This Mac" (sleep and wake events, network, free disk space, memory pressure).
+**Starter plug-ins:** a desktop app, Codex, a local service gateway (plus its scheduled health job), a mail bridge, Syncthing, Screen Sharing, and "This Mac" (sleep and wake events, network, free disk space, memory pressure).
 
 ---
 
@@ -108,12 +107,12 @@ Rules:
 
 ## 6. Example alert texts
 - **Down:** "Syncthing has stopped. It's not running. [Fix it: restart] [Ignore] [Details]"
-- **Stuck:** "An AI desktop app is open but hasn't answered for 12 minutes. The Mac didn't sleep and the network is fine, so the app itself has stalled. [Fix it: force restart] [Ignore] [Details]"
+- **Stuck:** "A desktop app is open but hasn't answered for 12 minutes. The Mac didn't sleep and the network is fine, so the app itself has stalled. [Fix it: force restart] [Ignore] [Details]"
 - **Hog:** "Docker has used most of the memory for 6 minutes and the Mac is slowing down. [Stop Docker] [Restart Docker] [Ignore]"
 - **Unknown hog:** "An app not on your list (ExampleTool) is using 95% CPU for 5 minutes. [Stop it] [Ignore]"
 - **Network:** "The Mac lost internet at 21:02. I'll re-check everything when it's back." Later: "Back at 21:09. All 8 services OK."
-- **Keeps happening:** "An AI desktop app has failed 3 times in the last hour. I've stopped offering automatic fixes. Worth a proper look. [Details]"
-- **After a fix:** "Fixed. An AI desktop app is answering again (took 14s)." / "Didn't work. An AI desktop app is still not answering."
+- **Keeps happening:** "A desktop app has failed 3 times in the last hour. I've stopped offering automatic fixes. Worth a proper look. [Details]"
+- **After a fix:** "Fixed. A desktop app is answering again (took 14s)." / "Didn't work. A desktop app is still not answering."
 
 ---
 
@@ -134,7 +133,16 @@ Rules:
 
 ## 8. One codebase, two modes
 - **Real mode:** reads `~/.config/daemon-doctor/config.yaml` (gitignored) with your services, keys, relay URL and FCM details.
-- **Demo mode** (`daemon-doctor demo`): fake services and a scripted incident replay. The Mac and network stay healthy, a fake assistant app "stalls", an alert is raised, it's approved, force-restarted and confirmed fixed. Then a fake "keeps happening" sequence. It needs no Mac, accounts or keys, and runs on Linux in CI. The Android app has a matching demo mode with built-in fake alerts.
+- **Demo mode** (`daemon-doctor demo`): fake services and a scripted incident replay. The Mac and network stay healthy, a fake desktop app "stalls", an alert is raised, it's approved, force-restarted and confirmed fixed. Then a fake "keeps happening" sequence. It needs no Mac, accounts or keys, and runs on Linux in CI. The Android app has a matching demo mode with built-in fake alerts.
+
+Relay settings use the local config key `relay.url`:
+
+```yaml
+relay:
+  url: https://your-relay.example.workers.dev
+```
+
+`daemon-doctor pair --out pairing.png` prints a terminal QR and saves the same pairing payload as a PNG. It includes a random Mac id, public key, one-time code, and the configured relay origin. Approvals use the existing signature verifier; only local allowlisted fixes run, followed by a recheck and result post. Failed posts retry in memory while the process runs.
 
 ## 9. Repo layout
 ```
@@ -145,13 +153,13 @@ daemon-doctor/
     rules/                  alert decisions, network hold-back, keeps-happening
     fixes/                  approved-fix runner and re-check
     plugins/                config loader and validator
-    relay/                  outbound WebSocket client
+    relay/                  outbound HTTP mailbox client
     security/               pairing, signature check, nonce store
     logbook/                local log with secret blanking
     mac/                    pmset, memory pressure, CPU, disk, launchctl readers
     demo/                   fake services and scripted incidents
-  plugins/                  starter YAML files (ai-desktop-app, codex, ai-gateway,
-                            gateway-cron-health, mail-bridge, syncthing, screen-sharing, this-mac)
+  plugins/                  starter YAML files for desktop apps, local services,
+                            mail, sync, screen sharing, and this-mac
   relay-worker/             Cloudflare Worker (TypeScript) and wrangler.toml
   android/                  Kotlin app (Jetpack Compose)
   launchd/                  example LaunchAgent plist
@@ -167,9 +175,9 @@ daemon-doctor/
 Each phase is built as a separate branch and pull request.
 After each phase, tests are re-run and GitHub checks must be green before any merge.
 
-1. **Mac core, with an AI desktop app and stuck detection.** Scheduler, check types, rules engine, local log, CLI `status`, LaunchAgent. An example AI desktop app plug-in with Down and Stuck detection. Fixes run locally after a "y" in the terminal, for now. Done when replaying a sample incident trace produces the right "stuck, not sleep or network" verdict.
+1. **Mac core, with a desktop app and stuck detection.** Scheduler, check types, rules engine, local log, CLI `status`, LaunchAgent. An example desktop app plug-in with Down and Stuck detection. Fixes run locally after a "y" in the terminal, for now. Done when replaying a sample incident trace produces the right "stuck, not sleep or network" verdict.
 2. **Other plug-ins and resource alerts.** The remaining 8 starter plug-ins, the memory and CPU hog rule with culprit naming, network hold-back and re-check, "keeps happening", and re-check after every fix.
-3. **Relay and pairing.** Cloudflare Worker, outbound WebSocket, QR pairing, signed single-use approvals with a 10-minute expiry, and nonce store. Done when the security tests pass, including a "malicious relay" test.
+3. **Relay and pairing.** Cloudflare Worker, outbound HTTP polling, terminal and PNG QR pairing, signed single-use approvals with a 10-minute expiry, and nonce store. Done when the security tests pass, including a "malicious relay" test.
 4. **Android app.** FCM push, alert cards (Fix it / Stop / Ignore / Details), status screen, alert history, Keystore signing, sideload APK built in CI.
 5. **Demo mode and README.** Scripted replays, demo GIF, architecture diagram, test results, measured cost and latency, and the README in the standard order: problem, who it's for, demo GIF, live demo or replay, architecture, test results, cost and latency, limits and next steps. Neutral wording and synthetic data only.
 
@@ -187,10 +195,10 @@ After each phase, tests are re-run and GitHub checks must be green before any me
 Go program: free. Cloudflare Worker and Durable Object: free tier. FCM: free. GitHub Actions on a public repo: free. Sideloaded APK: no Play Store fee. **Total: $0 / £0.**
 
 ## 13. Out of scope
-AI or LLM diagnosis. iPhone app (later). Fixing anything not on the approved list. Remote shell of any kind.
+Dynamic diagnosis. iPhone app (later). Fixing anything not on the approved list. Remote shell of any kind.
 
 ## 14. Open questions
-1. **The AI desktop app's "heartbeat" signal.** What's the cheapest reliable sign that its link is alive? Options are a local status endpoint, a recently updated file in its app data, or its network connections (`lsof`). To investigate in Phase 1.
+1. **The desktop app's "heartbeat" signal.** What's the cheapest reliable sign that its link is alive? Options are a local status endpoint, a recently updated file in its app data, or its network connections (`lsof`). To investigate in Phase 1.
 2. Should alert text be end-to-end encrypted so the relay can't read service names? (Small extra work, recommended.)
 3. Hog thresholds: is ~85% CPU / high memory pressure for 5 minutes a sensible default?
 4. Quiet hours: should non-urgent alerts wait overnight?

@@ -48,7 +48,7 @@ func TestRejectsBadIntervalAndUnknownField(t *testing.T) {
 func TestRelayURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	body := "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay_url: https://relay.example.invalid/mailbox\nstate_dir: state\n"
+	body := "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay:\n  url: https://your-relay.example.workers.dev\nstate_dir: state\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestRelayURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RelayURL != "https://relay.example.invalid/mailbox" {
+	if cfg.RelayURL != "https://your-relay.example.workers.dev" {
 		t.Fatalf("relay URL %q", cfg.RelayURL)
 	}
 	if cfg.StateDir != filepath.Join(dir, "state") {
@@ -74,5 +74,39 @@ func TestRelayURL(t *testing.T) {
 		if _, err := Load(path); err == nil {
 			t.Fatalf("expected %s to be rejected", raw)
 		}
+	}
+}
+
+func TestNestedRelayConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, ext, body string
+		wantError       bool
+	}{
+		{"yaml", ".yaml", "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay:\n  url: https://your-relay.example.workers.dev/\n", false},
+		{"toml", ".toml", "plugins_dir = 'plugins'\nlog_path = 'events.jsonl'\ninterval = '30s'\n[relay]\nurl = 'https://your-relay.example.workers.dev'\n", false},
+		{"legacy", ".yaml", "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay_url: https://your-relay.example.workers.dev\n", false},
+		{"conflict", ".yaml", "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay_url: https://your-relay.example.workers.dev\nrelay:\n  url: https://your-relay.example.workers.dev\n", true},
+		{"unknown yaml", ".yaml", "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nrelay:\n  endpoint: https://your-relay.example.workers.dev\n", true},
+		{"unknown toml", ".toml", "plugins_dir = 'plugins'\nlog_path = 'events.jsonl'\ninterval = '30s'\n[relay]\nendpoint = 'https://your-relay.example.workers.dev'\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config"+tc.ext)
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("accepted invalid config")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RelayURL != "https://your-relay.example.workers.dev" {
+				t.Fatalf("relay URL %q", cfg.RelayURL)
+			}
+		})
 	}
 }

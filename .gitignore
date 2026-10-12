@@ -27,6 +27,7 @@ google-services.json
 logs/
 *.log
 *.jsonl
+/pairing.png
 
 # Relay local install
 node_modules/
