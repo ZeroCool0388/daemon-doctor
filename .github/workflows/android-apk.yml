@@ -1,0 +1,74 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platforms;android-35 build-tools;35.0.0
+      - name: Gradle assembleDebug
+        working-directory: android
+        run: ./gradlew :app:assembleDebug
+      - name: Name and checksum the APK
+        run: |
+          mkdir -p "$RUNNER_TEMP/apk"
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          name="daemon-doctor-${ref//\//-}-debug.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/apk/$name"
+          cd "$RUNNER_TEMP/apk"
+          sha256sum "$name" > "$name.sha256"
+          ls -l
+          cat "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-doctor-debug-apk
+          path: ${{ runner.temp }}/apk/
+          if-no-files-found: error
+
+  release:
+    name: attach APK to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: daemon-doctor-debug-apk
+          path: apk
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" apk/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" apk/* --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
