@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
@@ -13,13 +14,15 @@ import (
 
 // Outcome is the result of one check.
 type Outcome struct {
-	Type       string
-	Healthy    bool
-	Failed     bool
-	Skipped    bool
-	NotRunning bool
-	Stuck      bool
-	Detail     string
+	Type         string
+	Healthy      bool
+	Failed       bool
+	Skipped      bool
+	NotRunning   bool
+	Stuck        bool
+	MissingFlags bool
+	JobFailed    bool
+	Detail       string
 }
 
 // Input is the data a check type sees for one sample.
@@ -31,6 +34,7 @@ type Input struct {
 	// Streak is the consecutive unhealthy samples for this check.
 	// The check updates it. The runner keeps it across samples.
 	Streak *int
+	Now    time.Time
 }
 
 // Type is one pluggable check.
@@ -49,11 +53,14 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{byType: map[string]Type{}}
 	r.mustRegister(processCheck{})
+	r.mustRegister(launchdCheck{})
 	r.mustRegister(sleepCheck{})
 	r.mustRegister(networkCheck{})
 	r.mustRegister(diskCheck{})
 	r.mustRegister(memoryCheck{})
 	r.mustRegister(cpuCheck{})
+	r.mustRegister(flagsCheck{})
+	r.mustRegister(fileRecentCheck{})
 	r.mustRegister(outboundCheck{})
 	return r
 }
@@ -89,6 +96,8 @@ func (r *Registry) Costs() map[string]int {
 type Runner struct {
 	reg    *Registry
 	streak map[string]int
+	// Now is the clock for age checks. Nil uses time.Now.
+	Now func() time.Time
 }
 
 // NewRunner returns a runner for reg.
@@ -126,6 +135,7 @@ func (r *Runner) Run(p plugins.Plugin, snap sysprobe.Snapshot) ([]Outcome, error
 			Index:  i,
 			Snap:   snap,
 			Streak: &streak,
+			Now:    r.now(),
 		})
 		r.streak[key] = streak
 		if oc.Type == "" {
@@ -138,6 +148,13 @@ func (r *Runner) Run(p plugins.Plugin, snap sysprobe.Snapshot) ([]Outcome, error
 		}
 	}
 	return out, nil
+}
+
+func (r *Runner) now() time.Time {
+	if r != nil && r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // AllHealthy reports whether every check ran and looked healthy on this sample.

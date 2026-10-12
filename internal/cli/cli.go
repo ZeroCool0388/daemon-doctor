@@ -63,7 +63,7 @@ Usage:
   daemon-doctor status [--config path]
   daemon-doctor run [--config path]
   daemon-doctor pair [--list] [--config path]
-  daemon-doctor fix --service id --action stop|restart|force-restart [--dry-run] [--yes] [--config path]
+  daemon-doctor fix --service id --action stop|restart|force-restart|launchctl_kickstart [--dry-run] [--yes] [--config path]
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
   daemon-doctor demo
@@ -148,7 +148,7 @@ func fixCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "", "path to config.yaml")
 	service := fs.String("service", "", "plug-in id")
 	processName := fs.String("process", "", "process name for an unwatched stop")
-	action := fs.String("action", "", "stop, restart, or force-restart")
+	action := fs.String("action", "", "stop, restart, force-restart, or launchctl_kickstart")
 	dryRun := fs.Bool("dry-run", false, "recheck without applying the fix")
 	yes := fs.Bool("yes", false, "apply the fix without a prompt")
 	approvalPath := fs.String("approval", "", "path to a signed approval")

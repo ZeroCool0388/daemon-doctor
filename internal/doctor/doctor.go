@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,11 +39,13 @@ type Doctor struct {
 	Fixes   *fixes.Runner
 	Log     *logbook.Book
 
-	mu    sync.Mutex
-	now   func() time.Time
-	sec   *security.Store
-	relay *relay.Client
-	push  push.Hook
+	mu          sync.Mutex
+	now         func() time.Time
+	sec         *security.Store
+	relay       *relay.Client
+	push        push.Hook
+	lastStatus  map[string]string
+	lastSummary time.Time
 }
 
 // New validates plug-ins and returns a doctor.
@@ -63,11 +66,13 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 		return nil, err
 	}
 	runner := checks.NewRunner(reg)
+	runner.Now = now
 	return &Doctor{
-		Plugins: list,
-		Source:  src,
-		Checks:  runner,
-		Rules:   rules.NewEngine(now),
+		Plugins:    list,
+		Source:     src,
+		Checks:     runner,
+		lastStatus: map[string]string{},
+		Rules:      rules.NewEngine(now),
 		Fixes: &fixes.Runner{
 			Source:  src,
 			Control: ctrl,
@@ -98,6 +103,9 @@ func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
 }
 
 func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
+	if hinted, ok := d.Source.(sysprobe.Hinted); ok {
+		hinted.SetHints(hintsFor(d.Plugins))
+	}
 	snap, err := d.Source.Take(ctx)
 	if err != nil {
 		return nil, err
@@ -169,8 +177,30 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 		}
 		out = append(out, st)
 	}
+	if err := d.logSummary(out); err != nil {
+		return nil, err
+	}
 	d.intake(ctx)
 	return out, nil
+}
+
+func hintsFor(list []plugins.Plugin) sysprobe.ProbeHints {
+	var hints sysprobe.ProbeHints
+	for _, p := range list {
+		for _, check := range p.Checks {
+			switch check.Type {
+			case plugins.CheckLaunchdJob:
+				if check.Label != "" {
+					hints.Labels = append(hints.Labels, check.Label)
+				}
+			case plugins.CheckFileRecent:
+				if check.Path != "" {
+					hints.Files = append(hints.Files, check.Path)
+				}
+			}
+		}
+	}
+	return hints
 }
 
 // Run calls Cycle immediately and then on each interval until ctx is cancelled.
@@ -329,6 +359,13 @@ func (d *Doctor) logCheck(p plugins.Plugin, outcomes []checks.Outcome, verdict r
 	if d.Log == nil {
 		return nil
 	}
+	if d.lastStatus == nil {
+		d.lastStatus = map[string]string{}
+	}
+	if d.lastStatus[p.ID] == verdict.Status {
+		return nil
+	}
+	d.lastStatus[p.ID] = verdict.Status
 	ok := checks.AllHealthy(outcomes)
 	return d.Log.Append(logbook.Event{
 		Time:        d.now(),
@@ -339,6 +376,49 @@ func (d *Doctor) logCheck(p plugins.Plugin, outcomes []checks.Outcome, verdict r
 		OK:          &ok,
 		Detail:      checks.Detail(outcomes),
 	})
+}
+
+func (d *Doctor) logSummary(rows []ServiceStatus) error {
+	if d.Log == nil {
+		return nil
+	}
+	now := d.now().UTC()
+	if d.lastSummary.IsZero() {
+		d.lastSummary = now
+		return nil
+	}
+	if now.Sub(d.lastSummary) < time.Hour {
+		return nil
+	}
+	d.lastSummary = now
+	sorted := append([]ServiceStatus(nil), rows...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	parts := make([]string, 0, len(sorted))
+	for _, row := range sorted {
+		name := row.Name
+		if name == "" {
+			name = row.ID
+		}
+		parts = append(parts, name+": "+summaryStatus(row.Status))
+	}
+	return d.Log.Append(logbook.Event{
+		Time:    now,
+		Kind:    "summary",
+		Message: "Hourly summary. " + strings.Join(parts, ". ") + ".",
+	})
+}
+
+func summaryStatus(status string) string {
+	switch status {
+	case rules.KindMissingFlags:
+		return "started without its required settings"
+	case rules.KindLaunchd:
+		return "not recently successful"
+	case "":
+		return "unknown"
+	default:
+		return status
+	}
 }
 
 func (d *Doctor) logAlert(a rules.Alert) error {

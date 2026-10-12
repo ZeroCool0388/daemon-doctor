@@ -18,7 +18,7 @@ func (outboundCheck) Run(in Input) Outcome {
 		n = 1
 	}
 	port := in.Spec.Port
-	roots := sysprobe.RootPIDs(in.Snap, in.Plugin.Process.Match)
+	roots := sysprobe.RootPIDsSpec(in.Snap, in.Plugin.Process.Spec())
 	count := sysprobe.CountOutbound(in.Snap, roots, port)
 	if in.Streak == nil {
 		zero := 0

@@ -16,19 +16,25 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
 )
 
 const (
-	CheckProcessRunning = "process_running"
-	CheckOutboundTCP    = "outbound_tcp"
-	CheckSleep          = "sleep_state"
-	CheckNetwork        = "network"
-	CheckDisk           = "disk_free"
-	CheckMemory         = "memory_pressure"
-	CheckCPU            = "cpu"
-	FixStop             = "stop"
-	FixRestart          = "restart"
-	FixForceRestart     = "force-restart"
+	CheckProcessRunning    = "process_running"
+	CheckLaunchdJob        = "launchd_job"
+	CheckOutboundTCP       = "outbound_tcp"
+	CheckSleep             = "sleep_state"
+	CheckNetwork           = "network"
+	CheckDisk              = "disk_free"
+	CheckMemory            = "memory_pressure"
+	CheckCPU               = "cpu"
+	CheckLaunchedWithFlags = "launched_with_flags"
+	CheckFileRecent        = "file_recent"
+	FixStop                = "stop"
+	FixRestart             = "restart"
+	FixForceRestart        = "force-restart"
+	FixKickstart           = "launchctl_kickstart"
 
 	// DefaultCPUPercent and DefaultDuration are used when a host plug-in
 	// omits them. The shipped this-mac plug-in sets both explicitly.
@@ -42,19 +48,23 @@ var FixAllowlist = map[string]struct{}{
 	FixStop:         {},
 	FixRestart:      {},
 	FixForceRestart: {},
+	FixKickstart:    {},
 }
 
 // BuiltinCosts ranks built-in checks. Lower numbers are cheaper and must
 // appear earlier in a plug-in file.
 func BuiltinCosts() map[string]int {
 	return map[string]int{
-		CheckProcessRunning: 10,
-		CheckSleep:          12,
-		CheckNetwork:        13,
-		CheckDisk:           14,
-		CheckMemory:         15,
-		CheckCPU:            16,
-		CheckOutboundTCP:    20,
+		CheckProcessRunning:    10,
+		CheckLaunchdJob:        11,
+		CheckSleep:             12,
+		CheckNetwork:           13,
+		CheckDisk:              14,
+		CheckMemory:            15,
+		CheckCPU:               16,
+		CheckLaunchedWithFlags: 18,
+		CheckFileRecent:        19,
+		CheckOutboundTCP:       20,
 	}
 }
 
@@ -70,21 +80,36 @@ type Plugin struct {
 	Fixes    map[string]Fix `yaml:"fixes" toml:"fixes"`
 }
 
-// ProcessMatch is the process name or executable path to watch.
-// Matching is exact against the process name, the executable, or its base name.
+// ProcessMatch selects the processes a service plug-in watches.
+// Match is exact against the process name, the executable, its base name, or the full command line.
+// CmdContains and CmdRegex look at the command line, so a service started by node
+// can match a script name without listing the whole command.
+// When more than one is set, every one of them has to match.
 type ProcessMatch struct {
-	Match string `yaml:"match" toml:"match"`
+	Match       string `yaml:"match" toml:"match"`
+	CmdContains string `yaml:"cmd_contains" toml:"cmd_contains"`
+	CmdRegex    string `yaml:"cmd_regex" toml:"cmd_regex"`
+	re          *regexp.Regexp
+}
+
+// Spec is the compiled selector. Validate fills the regular expression.
+func (m ProcessMatch) Spec() sysprobe.Selector {
+	return sysprobe.Selector{Exact: m.Match, Contains: m.CmdContains, Pattern: m.re}
 }
 
 // Check is one health check. Checks run in file order.
 type Check struct {
-	Type           string  `yaml:"type" toml:"type"`
-	Port           int     `yaml:"port" toml:"port"`
-	Consecutive    int     `yaml:"consecutive" toml:"consecutive"`
-	MinFreePercent float64 `yaml:"min_free_percent" toml:"min_free_percent"`
-	CPUPercent     float64 `yaml:"cpu_percent" toml:"cpu_percent"`
-	Duration       string  `yaml:"duration" toml:"duration"`
-	Level          string  `yaml:"level" toml:"level"`
+	Type           string   `yaml:"type" toml:"type"`
+	Port           int      `yaml:"port" toml:"port"`
+	Consecutive    int      `yaml:"consecutive" toml:"consecutive"`
+	MinFreePercent float64  `yaml:"min_free_percent" toml:"min_free_percent"`
+	CPUPercent     float64  `yaml:"cpu_percent" toml:"cpu_percent"`
+	Duration       string   `yaml:"duration" toml:"duration"`
+	Level          string   `yaml:"level" toml:"level"`
+	Label          string   `yaml:"label" toml:"label"`
+	MaxAge         string   `yaml:"max_age" toml:"max_age"`
+	Path           string   `yaml:"path" toml:"path"`
+	Flags          []string `yaml:"flags" toml:"flags"`
 }
 
 // Messages are the plain-English lines used when a rule fires.
@@ -103,14 +128,20 @@ type Messages struct {
 	MemoryHog          string `yaml:"memory_hog" toml:"memory_hog"`
 	CPUHogUnwatched    string `yaml:"cpu_hog_unwatched" toml:"cpu_hog_unwatched"`
 	MemoryHogUnwatched string `yaml:"memory_hog_unwatched" toml:"memory_hog_unwatched"`
+	MissingFlags       string `yaml:"missing_flags" toml:"missing_flags"`
+	LaunchdJob         string `yaml:"launchd_job" toml:"launchd_job"`
 }
 
-// Fix is one approved action. Kind must be stop, restart, or force-restart.
-// Launcher, when set, is an absolute program path executed directly
-// with no shell and no arguments. stop never launches a program.
+// Fix is one approved action. Kind must be stop, restart, force-restart,
+// or launchctl_kickstart. Launcher, when set, is an absolute program path
+// executed directly with no shell. Args are the fixed arguments from this
+// file. stop never launches a program. launchctl_kickstart takes a label
+// and does not take a launcher.
 type Fix struct {
-	Kind     string `yaml:"kind" toml:"kind"`
-	Launcher string `yaml:"launcher" toml:"launcher"`
+	Kind     string   `yaml:"kind" toml:"kind"`
+	Launcher string   `yaml:"launcher" toml:"launcher"`
+	Args     []string `yaml:"args" toml:"args"`
+	Label    string   `yaml:"label" toml:"label"`
 }
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -218,7 +249,9 @@ func Validate(p *Plugin, costs map[string]int) error {
 	}
 	p.ID = strings.TrimSpace(p.ID)
 	p.Name = strings.TrimSpace(p.Name)
-	p.Process.Match = strings.TrimSpace(p.Process.Match)
+	if err := normalizeProcess(&p.Process); err != nil {
+		return err
+	}
 	if !idPattern.MatchString(p.ID) {
 		return fmt.Errorf("id must be lowercase letters, digits, and hyphens")
 	}
@@ -226,10 +259,10 @@ func Validate(p *Plugin, costs map[string]int) error {
 		return fmt.Errorf("name is required")
 	}
 	if p.Host {
-		if p.Process.Match != "" {
+		if p.Process.Match != "" || p.Process.CmdContains != "" || p.Process.CmdRegex != "" {
 			return fmt.Errorf("a host plug-in does not take a process match")
 		}
-	} else if p.Process.Match == "" || p.Process.Match == "." || p.Process.Match == "/" {
+	} else if !processConfigured(p.Process) {
 		return fmt.Errorf("process match is required")
 	}
 	if len(p.Checks) == 0 {
@@ -267,11 +300,17 @@ func Validate(p *Plugin, costs map[string]int) error {
 		}
 	}
 	if !p.Host {
-		if !sawProcess {
-			return fmt.Errorf("process_running is required and must be the first check")
-		}
-		if p.Checks[0].Type != CheckProcessRunning {
+		_, sawJob := seenType[CheckLaunchdJob]
+		switch {
+		case sawProcess && p.Checks[0].Type != CheckProcessRunning:
 			return fmt.Errorf("process_running must be the first check")
+		case !sawProcess && !sawJob:
+			return fmt.Errorf("process_running or launchd_job is required")
+		case !sawProcess && p.Checks[0].Type != CheckLaunchdJob:
+			return fmt.Errorf("launchd_job must be the first check when process_running is absent")
+		}
+		if _, sawFlags := seenType[CheckLaunchedWithFlags]; sawFlags && !sawProcess {
+			return fmt.Errorf("launched_with_flags needs process_running")
 		}
 	}
 	if err := normalizeFixes(p); err != nil {
@@ -314,7 +353,7 @@ func isHostCheck(typ string) bool {
 func validateCheck(check *Check) error {
 	switch check.Type {
 	case CheckProcessRunning, CheckSleep, CheckNetwork:
-		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+		if err := unexpected(check); err != nil {
 			return fmt.Errorf("%s does not take extra settings", check.Type)
 		}
 	case CheckOutboundTCP:
@@ -324,14 +363,14 @@ func validateCheck(check *Check) error {
 		if check.Consecutive < 1 {
 			return fmt.Errorf("outbound_tcp consecutive must be at least 1")
 		}
-		if check.MinFreePercent != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+		if err := unexpected(check, "port", "consecutive"); err != nil {
 			return fmt.Errorf("outbound_tcp does not take disk, cpu, or memory settings")
 		}
 	case CheckDisk:
 		if check.MinFreePercent <= 0 || check.MinFreePercent > 100 {
 			return fmt.Errorf("disk_free min_free_percent must be above 0 and at most 100")
 		}
-		if check.Port != 0 || check.Consecutive != 0 || check.CPUPercent != 0 || check.Duration != "" || check.Level != "" {
+		if err := unexpected(check, "min_free_percent"); err != nil {
 			return fmt.Errorf("disk_free only takes min_free_percent")
 		}
 	case CheckMemory:
@@ -344,7 +383,7 @@ func validateCheck(check *Check) error {
 		if err := fillDuration(check); err != nil {
 			return err
 		}
-		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.CPUPercent != 0 {
+		if err := unexpected(check, "level", "duration"); err != nil {
 			return fmt.Errorf("memory_pressure only takes level and duration")
 		}
 	case CheckCPU:
@@ -357,9 +396,80 @@ func validateCheck(check *Check) error {
 		if err := fillDuration(check); err != nil {
 			return err
 		}
-		if check.Port != 0 || check.Consecutive != 0 || check.MinFreePercent != 0 || check.Level != "" {
+		if err := unexpected(check, "cpu_percent", "duration"); err != nil {
 			return fmt.Errorf("cpu only takes cpu_percent and duration")
 		}
+	case CheckLaunchdJob:
+		label, err := cleanLabel(check.Label)
+		if err != nil {
+			return err
+		}
+		check.Label = label
+		if _, err := parseMaxAge(check.MaxAge); err != nil {
+			return err
+		}
+		if err := unexpected(check, "label", "max_age"); err != nil {
+			return fmt.Errorf("launchd_job only takes label and max_age")
+		}
+	case CheckFileRecent:
+		path, err := cleanConfigPath(check.Path)
+		if err != nil {
+			return fmt.Errorf("file_recent path: %w", err)
+		}
+		check.Path = path
+		if _, err := parseMaxAge(check.MaxAge); err != nil {
+			return err
+		}
+		if err := unexpected(check, "path", "max_age"); err != nil {
+			return fmt.Errorf("file_recent only takes path and max_age")
+		}
+	case CheckLaunchedWithFlags:
+		flags, err := cleanFlags(check.Flags)
+		if err != nil {
+			return err
+		}
+		check.Flags = flags
+		if err := unexpected(check, "flags"); err != nil {
+			return fmt.Errorf("launched_with_flags only takes flags")
+		}
+	}
+	return nil
+}
+
+func unexpected(check *Check, allow ...string) error {
+	ok := map[string]struct{}{}
+	for _, name := range allow {
+		ok[name] = struct{}{}
+	}
+	if _, allowed := ok["port"]; !allowed && check.Port != 0 {
+		return fmt.Errorf("unexpected port")
+	}
+	if _, allowed := ok["consecutive"]; !allowed && check.Consecutive != 0 {
+		return fmt.Errorf("unexpected consecutive")
+	}
+	if _, allowed := ok["min_free_percent"]; !allowed && check.MinFreePercent != 0 {
+		return fmt.Errorf("unexpected min_free_percent")
+	}
+	if _, allowed := ok["cpu_percent"]; !allowed && check.CPUPercent != 0 {
+		return fmt.Errorf("unexpected cpu_percent")
+	}
+	if _, allowed := ok["duration"]; !allowed && check.Duration != "" {
+		return fmt.Errorf("unexpected duration")
+	}
+	if _, allowed := ok["level"]; !allowed && check.Level != "" {
+		return fmt.Errorf("unexpected level")
+	}
+	if _, allowed := ok["label"]; !allowed && strings.TrimSpace(check.Label) != "" {
+		return fmt.Errorf("unexpected label")
+	}
+	if _, allowed := ok["max_age"]; !allowed && strings.TrimSpace(check.MaxAge) != "" {
+		return fmt.Errorf("unexpected max_age")
+	}
+	if _, allowed := ok["path"]; !allowed && strings.TrimSpace(check.Path) != "" {
+		return fmt.Errorf("unexpected path")
+	}
+	if _, allowed := ok["flags"]; !allowed && len(check.Flags) != 0 {
+		return fmt.Errorf("unexpected flags")
 	}
 	return nil
 }
@@ -387,7 +497,7 @@ func normalizeFixes(p *Plugin) error {
 		key = strings.TrimSpace(key)
 		fix.Kind = strings.TrimSpace(fix.Kind)
 		if _, ok := FixAllowlist[key]; !ok {
-			return fmt.Errorf("fix %q is not on the allowlist (stop, restart, force-restart)", key)
+			return fmt.Errorf("fix %q is not on the allowlist (stop, restart, force-restart, launchctl_kickstart)", key)
 		}
 		if _, dup := cleaned[key]; dup {
 			return fmt.Errorf("fix %q is listed more than once", key)
@@ -395,18 +505,170 @@ func normalizeFixes(p *Plugin) error {
 		if fix.Kind != key {
 			return fmt.Errorf("fix %q must use kind %q", key, key)
 		}
-		if key == FixStop && strings.TrimSpace(fix.Launcher) != "" {
-			return fmt.Errorf("stop does not take a launcher")
-		}
-		launcher, err := cleanLauncher(fix.Launcher)
+		args, err := cleanArgs(fix.Args)
 		if err != nil {
 			return fmt.Errorf("fix %s: %w", key, err)
 		}
-		fix.Launcher = launcher
+		fix.Args = args
+		switch key {
+		case FixStop:
+			if strings.TrimSpace(fix.Launcher) != "" || len(fix.Args) != 0 || strings.TrimSpace(fix.Label) != "" {
+				return fmt.Errorf("stop does not take a launcher, arguments, or a label")
+			}
+			fix.Launcher = ""
+			fix.Label = ""
+		case FixKickstart:
+			if strings.TrimSpace(fix.Launcher) != "" || len(fix.Args) != 0 {
+				return fmt.Errorf("launchctl_kickstart does not take a launcher or arguments")
+			}
+			label, err := cleanLabel(fix.Label)
+			if err != nil {
+				return fmt.Errorf("fix %s: %w", key, err)
+			}
+			fix.Label = label
+			fix.Launcher = ""
+			fix.Args = nil
+		default:
+			if strings.TrimSpace(fix.Label) != "" {
+				return fmt.Errorf("%s does not take a label", key)
+			}
+			launcher, err := cleanLauncher(fix.Launcher)
+			if err != nil {
+				return fmt.Errorf("fix %s: %w", key, err)
+			}
+			if len(fix.Args) > 0 && launcher == "" {
+				return fmt.Errorf("fix %s: arguments need a launcher", key)
+			}
+			fix.Launcher = launcher
+			fix.Label = ""
+		}
 		cleaned[key] = fix
 	}
 	p.Fixes = cleaned
 	return nil
+}
+
+func processConfigured(m ProcessMatch) bool {
+	if m.CmdContains != "" || m.CmdRegex != "" {
+		return true
+	}
+	return m.Match != "" && m.Match != "." && m.Match != "/"
+}
+
+func normalizeProcess(m *ProcessMatch) error {
+	m.Match = strings.TrimSpace(m.Match)
+	m.CmdContains = strings.TrimSpace(m.CmdContains)
+	m.CmdRegex = strings.TrimSpace(m.CmdRegex)
+	m.re = nil
+	if len(m.CmdContains) > 512 {
+		return fmt.Errorf("cmd_contains is too long")
+	}
+	if m.CmdRegex == "" {
+		return nil
+	}
+	if len(m.CmdRegex) > 256 {
+		return fmt.Errorf("cmd_regex is too long")
+	}
+	re, err := regexp.Compile(m.CmdRegex)
+	if err != nil {
+		return fmt.Errorf("cmd_regex: %w", err)
+	}
+	m.re = re
+	return nil
+}
+
+func parseMaxAge(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("max_age is required")
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("max_age: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("max_age must be positive")
+	}
+	return d, nil
+}
+
+var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func cleanLabel(label string) (string, error) {
+	label = strings.TrimSpace(label)
+	if !labelPattern.MatchString(label) {
+		return "", fmt.Errorf("label must be a launchd label")
+	}
+	return label, nil
+}
+
+func cleanFlags(flags []string) ([]string, error) {
+	if len(flags) == 0 {
+		return nil, fmt.Errorf("launched_with_flags needs at least one flag")
+	}
+	out := make([]string, 0, len(flags))
+	seen := map[string]struct{}{}
+	for _, flag := range flags {
+		flag = strings.TrimSpace(flag)
+		if flag == "" || strings.ContainsAny(flag, " \t\n\r\x00") {
+			return nil, fmt.Errorf("flag must be one argument with no spaces")
+		}
+		if _, ok := seen[flag]; ok {
+			return nil, fmt.Errorf("flag %q is listed more than once", flag)
+		}
+		seen[flag] = struct{}{}
+		out = append(out, flag)
+	}
+	return out, nil
+}
+
+func cleanArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	if len(args) > 32 {
+		return nil, fmt.Errorf("too many arguments")
+	}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "" {
+			return nil, fmt.Errorf("argument is empty")
+		}
+		if strings.ContainsAny(arg, "\n\r\x00") {
+			return nil, fmt.Errorf("argument contains a control character")
+		}
+		out = append(out, arg)
+	}
+	return out, nil
+}
+
+func cleanConfigPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if strings.ContainsAny(path, "\n\r\x00") {
+		return "", fmt.Errorf("path contains a control character")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("path uses ~ but the home directory is unknown")
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	if strings.Contains(path, "~") {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	return cleaned, nil
 }
 
 // Approved reports whether action is on the allowlist and listed for p.

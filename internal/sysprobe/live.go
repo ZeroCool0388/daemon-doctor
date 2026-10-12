@@ -18,8 +18,16 @@ const hostReadTimeout = 2 * time.Second
 // liveSource reads the machine this process is running on.
 // It keeps the previous CPU sample so a percentage can be a delta.
 type liveSource struct {
-	mu   sync.Mutex
-	prev TickSample
+	mu    sync.Mutex
+	prev  TickSample
+	hints ProbeHints
+}
+
+// SetHints records the launchd labels and file paths the next sample should read.
+func (s *liveSource) SetHints(h ProbeHints) {
+	s.mu.Lock()
+	s.hints = h
+	s.mu.Unlock()
 }
 
 // Live returns a Source backed by the local operating system.
@@ -29,24 +37,27 @@ func (s *liveSource) Take(ctx context.Context) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
+	var snap Snapshot
 	switch runtime.GOOS {
 	case "linux":
-		snap, err := ReadProc("/proc")
+		var err error
+		snap, err = ReadProc("/proc")
 		if err != nil {
 			return Snapshot{}, err
 		}
 		s.annotateLinux(ctx, &snap)
-		return snap, nil
 	case "darwin":
-		snap, err := takeDarwin(ctx)
+		var err error
+		snap, err = takeDarwin(ctx)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		s.annotateDarwin(ctx, &snap)
-		return snap, nil
 	default:
 		return Snapshot{}, fmt.Errorf("unsupported operating system %s", runtime.GOOS)
 	}
+	s.fillHints(ctx, &snap)
+	return snap, nil
 }
 
 func (s *liveSource) annotateLinux(ctx context.Context, snap *Snapshot) {
@@ -168,6 +179,7 @@ func takeDarwin(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	procs = attachExePaths(ctx, procs)
 	lsofCmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F", "pn")
 	lsofOut, err := lsofCmd.Output()
 	if err != nil {
@@ -179,4 +191,62 @@ func takeDarwin(ctx context.Context) (Snapshot, error) {
 		}
 	}
 	return Snapshot{Processes: procs, OutboundPorts: ParseLsofF(string(lsofOut))}, nil
+}
+
+// attachExePaths fills Exe from `ps -o comm=`. The path is its own column,
+// so an application path that contains spaces is not split out of the arguments.
+func attachExePaths(ctx context.Context, procs []Process) []Process {
+	out, err := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=", "-o", "comm=").Output()
+	if err != nil {
+		return procs
+	}
+	paths, err := ParsePSPaths(string(out))
+	if err != nil {
+		return procs
+	}
+	return ApplyExePaths(procs, paths)
+}
+
+func (s *liveSource) fillHints(ctx context.Context, snap *Snapshot) {
+	s.mu.Lock()
+	hints := s.hints
+	s.mu.Unlock()
+	if len(hints.Files) > 0 {
+		snap.Files = statFiles(hints.Files)
+	}
+	if runtime.GOOS == "darwin" && len(hints.Labels) > 0 {
+		snap.Launchd = readLaunchdJobs(ctx, hints.Labels)
+	}
+}
+
+func statFiles(paths []string) map[string]FileStamp {
+	out := make(map[string]FileStamp, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				out[path] = FileStamp{Known: true, Missing: true}
+			}
+			continue
+		}
+		out[path] = FileStamp{Known: true, ModTime: info.ModTime()}
+	}
+	return out
+}
+
+func readLaunchdJobs(ctx context.Context, labels []string) map[string]LaunchdJob {
+	out := make(map[string]LaunchdJob, len(labels))
+	uid := os.Getuid()
+	for _, label := range labels {
+		target := fmt.Sprintf("gui/%d/%s", uid, label)
+		text, ok := commandOutput(ctx, hostReadTimeout, "launchctl", "print", target)
+		if !ok {
+			continue
+		}
+		job, found := ParseLaunchctlPrint(text)
+		if found {
+			out[label] = job
+		}
+	}
+	return out
 }

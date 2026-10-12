@@ -1,7 +1,9 @@
-// Package fixes runs stop, restart, and force-restart, and only those.
+// Package fixes runs stop, restart, force-restart, and launchctl_kickstart.
 // The action has to be on the plug-in's allowlist, except an unwatched
 // stop which the caller has already authorized. Dry-run does not signal
 // or launch anything, and every attempt is rechecked. stop never launches.
+// restart and force-restart signal the matched process and its children,
+// children first. launchctl_kickstart does not send a separate signal.
 package fixes
 
 import (
@@ -18,9 +20,10 @@ import (
 )
 
 // Controller performs the system calls a fix needs.
+// Launch starts path directly with args. It does not use a shell.
 type Controller interface {
 	Signal(pid int, sig syscall.Signal) error
-	Launch(ctx context.Context, path string) error
+	Launch(ctx context.Context, path string, args []string) error
 }
 
 // Result is what a fix attempt did, including the recheck.
@@ -30,6 +33,7 @@ type Result struct {
 	PIDs        []int
 	Signal      string
 	WouldLaunch string
+	LaunchArgs  []string
 	Launched    string
 	SignalError string
 	LaunchError string
@@ -59,6 +63,9 @@ func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dry
 		return Result{}, fmt.Errorf("fix %q is not approved for %s", action, p.ID)
 	}
 	fix := p.Fixes[action]
+	if action == plugins.FixKickstart {
+		return r.applyKickstart(ctx, p, fix, dryRun, start)
+	}
 	if fix.Launcher != "" {
 		if !strings.HasPrefix(fix.Launcher, "/") {
 			return Result{}, fmt.Errorf("launcher must be an absolute path")
@@ -77,16 +84,19 @@ func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dry
 		sigName = "KILL"
 	}
 	launch := fix.Launcher
+	args := append([]string(nil), fix.Args...)
 	if action == plugins.FixStop {
 		launch = ""
+		args = nil
 	}
 	res := Result{
-		Action: action,
-		DryRun: dryRun,
-		PIDs:   pids,
-		Signal: sigName,
+		Action:     action,
+		DryRun:     dryRun,
+		PIDs:       pids,
+		Signal:     sigName,
+		LaunchArgs: args,
 	}
-	if err := r.signal(ctx, &res, pids, sig, launch, dryRun); err != nil {
+	if err := r.signal(ctx, &res, pids, sig, launch, args, dryRun); err != nil {
 		return Result{}, err
 	}
 
@@ -131,7 +141,7 @@ func (r *Runner) ApplyStop(ctx context.Context, processName string, dryRun bool)
 		PIDs:   pids,
 		Signal: "TERM",
 	}
-	if err := r.signal(ctx, &res, pids, syscall.SIGTERM, "", dryRun); err != nil {
+	if err := r.signal(ctx, &res, pids, syscall.SIGTERM, "", nil, dryRun); err != nil {
 		return Result{}, err
 	}
 	recheck, err := r.Source.Take(ctx)
@@ -160,7 +170,61 @@ func ValidProcessName(name string) error {
 	return nil
 }
 
-func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscall.Signal, launch string, dryRun bool) error {
+func (r *Runner) applyKickstart(ctx context.Context, p plugins.Plugin, fix plugins.Fix, dryRun bool, start time.Time) (Result, error) {
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), fix.Label)
+	args := []string{"kickstart", "-k", target}
+	res := Result{
+		Action:     plugins.FixKickstart,
+		DryRun:     dryRun,
+		LaunchArgs: args,
+	}
+	if dryRun {
+		res.WouldLaunch = "launchctl"
+		res.Detail = "dry-run: would run launchctl kickstart -k " + target
+	} else {
+		if r.Control == nil {
+			return Result{}, fmt.Errorf("no fix controller is configured")
+		}
+		if err := r.Control.Launch(ctx, "launchctl", args); err != nil {
+			res.LaunchError = err.Error()
+		} else {
+			res.Launched = "launchctl"
+		}
+		res.Detail = "ran launchctl kickstart -k " + target
+		if res.LaunchError != "" {
+			res.Detail += "; launch error: " + res.LaunchError
+		}
+	}
+	return r.finish(ctx, p, res, start)
+}
+
+func (r *Runner) finish(ctx context.Context, p plugins.Plugin, res Result, start time.Time) (Result, error) {
+	recheck, err := r.Source.Take(ctx)
+	if err != nil {
+		res.Duration = time.Since(start)
+		res.Message = plainMessage(p.Name, res)
+		return res, err
+	}
+	outcomes, err := r.Checks.Run(p, recheck)
+	if err != nil {
+		res.Duration = time.Since(start)
+		res.Message = plainMessage(p.Name, res)
+		return res, err
+	}
+	res.Outcomes = outcomes
+	res.Fixed = checks.AllHealthy(outcomes)
+	res.Duration = time.Since(start)
+	if d := checks.Detail(outcomes); d != "" {
+		if res.Detail != "" {
+			res.Detail += "; "
+		}
+		res.Detail += "recheck: " + d
+	}
+	res.Message = plainMessage(p.Name, res)
+	return res, nil
+}
+
+func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscall.Signal, launch string, args []string, dryRun bool) error {
 	if dryRun {
 		res.WouldLaunch = launch
 		return nil
@@ -178,7 +242,7 @@ func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscal
 		}
 	}
 	if launch != "" {
-		if err := r.Control.Launch(ctx, launch); err != nil {
+		if err := r.Control.Launch(ctx, launch, args); err != nil {
 			res.LaunchError = err.Error()
 		} else {
 			res.Launched = launch
@@ -196,12 +260,12 @@ func detail(res Result, launcher string) string {
 	if res.DryRun {
 		fmt.Fprintf(&b, "dry-run: would send %s to pids %v", res.Signal, res.PIDs)
 		if launcher != "" {
-			fmt.Fprintf(&b, " and launch %s", launcher)
+			fmt.Fprintf(&b, " and launch %s", formatLaunch(launcher, res.LaunchArgs))
 		}
 	} else {
 		fmt.Fprintf(&b, "sent %s to pids %v", res.Signal, res.PIDs)
 		if res.Launched != "" {
-			fmt.Fprintf(&b, " and launched %s", res.Launched)
+			fmt.Fprintf(&b, " and launched %s", formatLaunch(res.Launched, res.LaunchArgs))
 		}
 	}
 	if res.SignalError != "" {
@@ -212,6 +276,23 @@ func detail(res Result, launcher string) string {
 	}
 	if d := checks.Detail(res.Outcomes); d != "" {
 		fmt.Fprintf(&b, "; recheck: %s", d)
+	}
+	return b.String()
+}
+
+func formatLaunch(path string, args []string) string {
+	if path == "" || len(args) == 0 {
+		return path
+	}
+	var b strings.Builder
+	b.WriteString(path)
+	for _, arg := range args {
+		b.WriteByte(' ')
+		if strings.ContainsAny(arg, " \t") {
+			b.WriteString(fmt.Sprintf("%q", arg))
+		} else {
+			b.WriteString(arg)
+		}
 	}
 	return b.String()
 }

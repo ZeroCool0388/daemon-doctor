@@ -15,7 +15,7 @@ func (processCheck) Type() string { return plugins.CheckProcessRunning }
 func (processCheck) Cost() int    { return plugins.BuiltinCosts()[plugins.CheckProcessRunning] }
 
 func (processCheck) Run(in Input) Outcome {
-	found := sysprobe.Matching(in.Snap, in.Plugin.Process.Match)
+	found := sysprobe.MatchingSpec(in.Snap, in.Plugin.Process.Spec())
 	if len(found) == 0 {
 		return Outcome{
 			Type:       plugins.CheckProcessRunning,

@@ -90,7 +90,7 @@ func TestEveryDefaultTemplateFills(t *testing.T) {
 		"time": "21:02 UTC", "ok": "2", "total": "3",
 	}
 	for _, kind := range []string{
-		KindDown, KindStuck, KindKeepsHappening, KindSleep, KindWake,
+		KindDown, KindStuck, KindMissingFlags, KindLaunchd, KindKeepsHappening, KindSleep, KindWake,
 		KindNetworkDown, KindNetworkBack, KindDiskLow, KindCPUHog, KindMemoryHog,
 		KindCPUHog + "_unwatched", KindMemoryHog + "_unwatched",
 	} {

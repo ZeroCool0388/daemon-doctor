@@ -142,6 +142,7 @@ fun fixIdFor(alert: Alert, button: AlertButton): String? {
         AlertButton.Fix -> when {
             "restart" in alert.actions -> "restart"
             "force-restart" in alert.actions -> "force-restart"
+            "launchctl_kickstart" in alert.actions -> "launchctl_kickstart"
             else -> null
         }
         else -> null

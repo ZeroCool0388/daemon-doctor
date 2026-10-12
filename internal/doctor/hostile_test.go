@@ -37,7 +37,7 @@ func (s *signalCounter) Signal(int, syscall.Signal) error {
 	return nil
 }
 
-func (s *signalCounter) Launch(context.Context, string) error {
+func (s *signalCounter) Launch(context.Context, string, []string) error {
 	s.mu.Lock()
 	s.launches++
 	s.mu.Unlock()

@@ -12,6 +12,8 @@ import (
 const (
 	KindDown           = "down"
 	KindStuck          = "stuck"
+	KindMissingFlags   = "missing_flags"
+	KindLaunchd        = "launchd_job"
 	KindKeepsHappening = "keeps_happening"
 	KindSleep          = "sleep"
 	KindWake           = "wake"
@@ -83,7 +85,7 @@ func NewEngine(now func() time.Time) *Engine {
 // Decide applies the down, stuck, repeat, and keeps-happening rules.
 func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 	s := e.service(p.ID)
-	notRunning, stuck, healthy := summarize(outcomes)
+	notRunning, stuck, missingFlags, jobFailed, healthy := summarize(outcomes)
 	if notRunning {
 		s.downStreak++
 	} else {
@@ -94,6 +96,10 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 	switch {
 	case s.downStreak >= downStreakNeeded:
 		kind = KindDown
+	case missingFlags:
+		kind = KindMissingFlags
+	case jobFailed:
+		kind = KindLaunchd
 	case stuck:
 		kind = KindStuck
 	default:
@@ -132,7 +138,7 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 				ServiceID:   p.ID,
 				ServiceName: p.Name,
 				Kind:        KindKeepsHappening,
-				Message:     message(p, KindKeepsHappening),
+				Message:     alertText(p, KindKeepsHappening, outcomes),
 				At:          now,
 			}},
 		}
@@ -144,6 +150,22 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 		switch kind {
 		case KindDown:
 			if plugins.Approved(p, plugins.FixRestart) {
+				offer = true
+				action = plugins.FixRestart
+			} else if plugins.Approved(p, plugins.FixKickstart) {
+				offer = true
+				action = plugins.FixKickstart
+			}
+		case KindMissingFlags:
+			if plugins.Approved(p, plugins.FixRestart) {
+				offer = true
+				action = plugins.FixRestart
+			}
+		case KindLaunchd:
+			if plugins.Approved(p, plugins.FixKickstart) {
+				offer = true
+				action = plugins.FixKickstart
+			} else if plugins.Approved(p, plugins.FixRestart) {
 				offer = true
 				action = plugins.FixRestart
 			}
@@ -158,7 +180,7 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 		ServiceID:   p.ID,
 		ServiceName: p.Name,
 		Kind:        kind,
-		Message:     message(p, kind),
+		Message:     alertText(p, kind, outcomes),
 		OfferFix:    offer,
 		Action:      action,
 		At:          now,
@@ -178,7 +200,7 @@ func (e *Engine) service(id string) *state {
 	return s
 }
 
-func summarize(outcomes []checks.Outcome) (notRunning, stuck, healthy bool) {
+func summarize(outcomes []checks.Outcome) (notRunning, stuck, missingFlags, jobFailed, healthy bool) {
 	healthy = len(outcomes) > 0
 	saw := false
 	for _, o := range outcomes {
@@ -196,11 +218,17 @@ func summarize(outcomes []checks.Outcome) (notRunning, stuck, healthy bool) {
 		if o.Stuck {
 			stuck = true
 		}
+		if o.MissingFlags {
+			missingFlags = true
+		}
+		if o.JobFailed {
+			jobFailed = true
+		}
 	}
 	if !saw {
 		healthy = false
 	}
-	return notRunning, stuck, healthy
+	return notRunning, stuck, missingFlags, jobFailed, healthy
 }
 
 func prune(times []time.Time, cutoff time.Time) []time.Time {

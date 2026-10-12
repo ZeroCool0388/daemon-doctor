@@ -111,7 +111,7 @@ func (s *stage) Signal(pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func (s *stage) Launch(context.Context, string) error {
+func (s *stage) Launch(context.Context, string, []string) error {
 	return fmt.Errorf("demo does not launch programs")
 }
 
