@@ -119,7 +119,7 @@ From `android/`:
 ./gradlew :app:assembleDebug
 ```
 
-The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Install it with `adb install -r` on that file, or copy it to the phone and open it there. The phone has to allow install of that file. The app starts in demo mode, so it does not need `google-services.json` or a relay. To turn on Firebase later, copy `android/google-services.json.example` to `android/app/google-services.json` and replace the placeholders with the owner's Firebase project. That copy is gitignored.
+The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. The `Android APK` workflow also builds it on every push to `main` and uploads it as the `daemon-doctor-debug-apk` artifact, with a `.sha256` file. Pushing a `v*` tag attaches the same two files to a GitHub release for that tag. Each CI run signs with a fresh debug key, so installing a newer CI build over an older one needs an uninstall first. Install it with `adb install -r` on that file, or copy it to the phone and open it there. The phone has to allow install of that file. The app starts in demo mode, so it does not need `google-services.json` or a relay. To turn on Firebase later, copy `android/google-services.json.example` to `android/app/google-services.json` and replace the placeholders with the owner's Firebase project. That copy is gitignored.
 
 ```
 go build -o daemon-doctor ./cmd/daemon-doctor
