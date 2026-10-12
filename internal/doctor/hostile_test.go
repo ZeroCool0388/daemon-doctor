@@ -16,7 +16,6 @@ import (
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
@@ -236,13 +235,12 @@ func TestOutboundWatchRunsSignedApproval(t *testing.T) {
 	t.Fatal("watch did not apply the signed approval")
 }
 
-func TestPushHookAndRelayFailureStayLocal(t *testing.T) {
+func TestRelayFailureStaysLocal(t *testing.T) {
 	dir := t.TempDir()
 	mac, err := security.LoadOrCreate(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hook := &countHook{}
 	book := openBook(t, dir)
 	src := &sysprobe.MemSource{}
 	d, err := New([]plugins.Plugin{loadExample(t)}, src, &signalCounter{}, book, nil, time.Now)
@@ -254,7 +252,7 @@ func TestPushHookAndRelayFailureStayLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad.HTTP.Timeout = 200 * time.Millisecond
-	d.UseRelay(mac, bad, hook)
+	d.UseRelay(mac, bad)
 	src.Set(sysprobe.Snapshot{})
 	if _, err := d.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -263,24 +261,15 @@ func TestPushHookAndRelayFailureStayLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindDown {
+	if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindDown || rows[0].Alerts[0].ID == "" {
 		t.Fatalf("rows %+v", rows)
 	}
-	if hook.n != 1 || rows[0].Alerts[0].ID == "" {
-		t.Fatalf("push %d alert %+v", hook.n, rows[0].Alerts[0])
+	if bad.Pending() != 1 {
+		t.Fatalf("pending %d", bad.Pending())
 	}
 	if !sawKind(t, book.Path(), "relay") {
 		t.Fatalf("log %s", mustRead(t, book.Path()))
 	}
-}
-
-type countHook struct {
-	n int
-}
-
-func (c *countHook) Deliver(context.Context, string, string, string) error {
-	c.n++
-	return nil
 }
 
 func pairMac(t *testing.T, dir string, now time.Time) (*security.Store, ed25519.PrivateKey) {
@@ -319,7 +308,7 @@ func newLocalDoctor(t *testing.T, dir string, mac *security.Store, base string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.UseRelay(mac, client, push.Stub{})
+	d.UseRelay(mac, client)
 	return d
 }
 

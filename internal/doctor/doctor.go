@@ -14,7 +14,6 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
@@ -43,7 +42,6 @@ type Doctor struct {
 	now         func() time.Time
 	sec         *security.Store
 	relay       *relay.Client
-	push        push.Hook
 	lastStatus  map[string]string
 	lastSummary time.Time
 }
@@ -83,14 +81,14 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 	}, nil
 }
 
-// UseRelay attaches local approval state, the outbound mailbox client, and
-// the phone push hook. A nil client keeps alerts on this machine.
-func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client, hook push.Hook) {
+// UseRelay attaches local approval state and the outbound mailbox client.
+// The relay sends the phone push when an alert is posted. A nil client keeps
+// alerts on this machine.
+func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sec = sec
 	d.relay = client
-	d.push = hook
 }
 
 // Cycle takes one sample, runs every plug-in, and logs checks and alerts.
@@ -538,12 +536,7 @@ func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 			"actions":      actions,
 			"process":      a.Process,
 		}
-		if err := d.relay.Post(ctx, d.sec.MacID(), "alerts", body); err != nil {
-			_ = d.logNote(err.Error())
-		}
-	}
-	if d.push != nil && d.sec != nil {
-		if err := d.push.Deliver(ctx, d.sec.MacID(), a.ID, a.Message); err != nil {
+		if err := d.relay.Send(ctx, d.sec.MacID(), "alerts", body); err != nil {
 			_ = d.logNote(err.Error())
 		}
 	}
@@ -566,6 +559,9 @@ func offeredActions(a rules.Alert) []string {
 func (d *Doctor) intake(ctx context.Context) {
 	if d.relay == nil || d.sec == nil {
 		return
+	}
+	if err := d.relay.Flush(ctx); err != nil {
+		_ = d.logNote(err.Error())
 	}
 	for _, kind := range []string{"pairing", "approvals"} {
 		events, err := d.relay.Poll(ctx, d.sec.MacID(), kind)
@@ -612,18 +608,15 @@ func (d *Doctor) startWatch(ctx context.Context) {
 		return
 	}
 	macID := sec.MacID()
-	go func() {
-		err := client.Watch(ctx, macID, func(event relay.Event) {
-			d.mu.Lock()
-			d.handle(ctx, event)
-			d.mu.Unlock()
-		})
-		if err != nil && ctx.Err() == nil {
-			d.mu.Lock()
-			_ = d.logNote(err.Error())
-			d.mu.Unlock()
-		}
-	}()
+	go client.Listen(ctx, macID, func(event relay.Event) {
+		d.mu.Lock()
+		d.handle(ctx, event)
+		d.mu.Unlock()
+	}, func(err error) {
+		d.mu.Lock()
+		_ = d.logNote(err.Error())
+		d.mu.Unlock()
+	})
 }
 
 func (d *Doctor) publishResult(ctx context.Context, alertID, fixID string, res fixes.Result, applyErr error) {
@@ -640,7 +633,7 @@ func (d *Doctor) publishResult(ctx context.Context, alertID, fixID string, res f
 		"fixed":    applyErr == nil && res.Fixed,
 		"message":  msg,
 	}
-	if err := d.relay.Post(ctx, d.sec.MacID(), "results", body); err != nil {
+	if err := d.relay.Send(ctx, d.sec.MacID(), "results", body); err != nil {
 		_ = d.logNote(err.Error())
 	}
 }

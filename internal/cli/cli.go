@@ -21,7 +21,6 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
@@ -313,7 +312,7 @@ func fixApproval(path, approvalPath string, dryRun bool, stdout, stderr io.Write
 			return 1
 		}
 	}
-	d.UseRelay(sec, client, push.Stub{})
+	d.UseRelay(sec, client)
 	res, err := d.ApplyApproval(context.Background(), raw, dryRun)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -512,7 +511,7 @@ func attachRelay(d *doctor.Doctor, cfg config.Config) error {
 		if err != nil {
 			return nil
 		}
-		d.UseRelay(sec, nil, nil)
+		d.UseRelay(sec, nil)
 		return nil
 	}
 	sec, err := security.Open(cfg.StateDir)
@@ -523,7 +522,10 @@ func attachRelay(d *doctor.Doctor, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	d.UseRelay(sec, client, push.Stub{})
+	if err := client.UseCursorFile(filepath.Join(cfg.StateDir, "relay-cursor.json")); err != nil {
+		return err
+	}
+	d.UseRelay(sec, client)
 	return nil
 }
 

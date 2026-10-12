@@ -1,6 +1,7 @@
 # Placeholder config. Copy to ~/.config/daemon-doctor/config.yaml.
 # No keys or account data belong here. Leave relay_url unset to stay local.
-# relay_url: https://relay.example.invalid
+# Set relay_url only in your local copy, to the base URL of your own deployed worker.
+# relay_url: https://your-relay.example.workers.dev
 plugins_dir: plugins
 log_path: /tmp/daemon-doctor/events.jsonl
 interval: 30s
