@@ -24,6 +24,37 @@ describe("health", () => {
 });
 
 describe("mailbox", () => {
+  it("bounds backlog pages and can restart from zero", async () => {
+    const id = mac(20);
+    const body = JSON.stringify({ pad: "x".repeat(4000) });
+    // Stored bodies alone exceed the Mac client's 1 MiB response limit.
+    for (let n = 0; n < 300; n++) {
+      const posted = await SELF.fetch(url(id, "approvals"), { method: "POST", body });
+      expect(posted.status).toBe(200);
+    }
+    for (let restart = 0; restart < 2; restart++) {
+      let after = 0;
+      let count = 0;
+      let more = true;
+      while (more) {
+        const response = await SELF.fetch(`${url(id, "approvals")}?after=${after}&limit=10000`);
+        const raw = await response.text();
+        expect(new TextEncoder().encode(raw).byteLength).toBeLessThan(1024 * 1024);
+        const page = JSON.parse(raw) as { events: { id: number }[]; next_after: number; has_more: boolean };
+        expect(page.events.length).toBeLessThanOrEqual(100);
+        expect(page.events[0].id).toBeGreaterThan(after);
+        expect(page.next_after).toBe(page.events.at(-1)?.id);
+        count += page.events.length;
+        after = page.next_after;
+        more = page.has_more;
+      }
+      expect(count).toBe(300);
+    }
+    const first = (await (await SELF.fetch(`${url(id, "approvals")}?limit=3`)).json()) as { events: unknown[]; has_more: boolean };
+    expect(first.events).toHaveLength(3);
+    expect(first.has_more).toBe(true);
+    expect((await SELF.fetch(`${url(id, "approvals")}?limit=0`)).status).toBe(400);
+  }, 15000);
   it("forwards an approval unchanged", async () => {
     const body = {
       mac_id: mac(1),

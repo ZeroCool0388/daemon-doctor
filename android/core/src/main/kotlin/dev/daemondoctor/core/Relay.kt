@@ -7,6 +7,9 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 data class HttpResponse(val status: Int, val body: String)
 
@@ -22,12 +25,22 @@ fun relayUrl(base: String, macId: String, box: String): String {
     return base.trimEnd('/') + "/v1/macs/" + macId + "/" + box
 }
 
-fun pairingBody(code: String, publicKey: ByteArray): String {
-    return buildPairing(code, b64Url(publicKey))
-}
-
-private fun buildPairing(code: String, publicKey: String): String {
-    return "{\"code\":${quote(code)},\"public_key\":${quote(publicKey)}}"
+fun pairingBody(payload: PairingPayload, publicKey: ByteArray): String {
+    require(publicKey.size == 32)
+    val secret = payload.code.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    val pairingId = MessageDigest.getInstance("SHA-256").digest(secret)
+        .joinToString("") { "%02x".format(it.toInt() and 255) }
+    val canonical = listOf(
+        "daemon-doctor/pairing/v2",
+        "mac_id=${payload.macId}",
+        "mac_public_key=${b64Url(payload.macPublicKey)}",
+        "pairing_id=$pairingId",
+        "phone_public_key=${b64Url(publicKey)}",
+    ).joinToString("\n")
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(secret, "HmacSHA256"))
+    val proof = b64Url(mac.doFinal(canonical.toByteArray(Charsets.UTF_8)))
+    return "{\"pairing_id\":${quote(pairingId)},\"public_key\":${quote(b64Url(publicKey))},\"proof\":${quote(proof)}}"
 }
 
 private fun quote(value: String): String {
@@ -56,7 +69,7 @@ data class PairingPayload(
 
 fun parsePairingPayload(raw: String): PairingPayload? {
     val parts = raw.trim().split(":")
-    if (parts.size < 5 || parts[0] != "daemon-doctor" || parts[1] != "1") {
+    if (parts.size < 6 || parts[0] != "daemon-doctor" || parts[1] != "2") {
         return null
     }
     if (!hexIdOk(parts[2]) || !hexIdOk(parts[4])) {

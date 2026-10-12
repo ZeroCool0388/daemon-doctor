@@ -23,7 +23,7 @@ Daemon Doctor does that checking for you, all the time, and explains what it fou
 
 ### Relay (the go-between for the Mac and phone): **Cloudflare Worker**
 A "Worker" is a tiny program Cloudflare runs for you on its servers.
-- The free plan covers this easily: about 100,000 requests a day, and we'd use a few hundred.
+- The Workers free tier allows 100,000 requests a day. Two Mac polls every five seconds use 34,560 requests/day. With a 30-second check interval, check-cycle polls add 5,760/day; one Android poll every 15 seconds adds 5,760/day while running. That is about 46,080/day before alert posts, approvals, retries, and pairing. More Macs or phones increase this total.
 - It never goes to sleep. Supabase's free projects pause after a week with no activity, which is the wrong trait for an alert system.
 - It stores alerts and approvals in a free Durable Object. The Mac polls the mailbox over HTTPS every five seconds.
 - It can send phone pushes through Firebase Cloud Messaging (FCM, Google's free push service).
@@ -118,12 +118,12 @@ Rules:
 
 ## 7. Security model (plain English)
 - **Fixed menu only.** The Mac only runs fixes written in its local config. A message can only say "do fix #2 for alert #123". It can never carry a command. Unknown fix: ignored and logged.
-- **Pairing by QR code.** The Mac shows a QR code in the terminal or a small web page on the Mac itself. The phone scans it. They swap public keys (a public key lets someone check a signature but not make one). The phone's private key stays locked in Android's secure key storage (Keystore).
+- **Pairing by QR code.** The Mac shows a QR code in the terminal or a small web page on the Mac itself. The phone scans it. The QR also carries a random one-time secret. The phone sends its public key with a proof derived from that secret and both device identities; it never sends the secret to the relay. The Mac verifies that proof before storing the phone key (a public key lets someone check a signature but not make one). The phone's private key stays locked in Android's secure key storage (Keystore).
 - **Signed, single-use approvals.** When you tap "Fix it", the phone signs exactly: this Mac, this alert, this fix, a random one-off number (a "nonce") and an expiry 10 minutes ahead. The Mac checks:
   1. the signature is from the paired phone,
   2. the alert and fix match an alert it actually raised,
   3. it hasn't expired,
-  4. the nonce hasn't been used before (no replays).
+  4. the nonce hasn't been used before (no replays). Consumption is recorded under a shared local file lock, including when two processes have already opened the same state.
 - **The relay isn't trusted.** Even if someone took over the Cloudflare Worker, they couldn't forge a phone signature, so they couldn't trigger anything. At worst they could block or delay messages. Alerts are kept short and carry no secrets. Optionally they can be encrypted end to end, so the relay can't read them (open question).
 - **Outbound only.** The Mac opens the connection out to the relay. There are no open ports on the Mac.
 - **Secrets stay local.** Keys and relay and FCM details live in a gitignored local config file (one that's never uploaded). The public repo only has a `config.example.yaml`.
@@ -142,7 +142,7 @@ relay:
   url: https://your-relay.example.workers.dev
 ```
 
-`daemon-doctor pair --out pairing.png` prints a terminal QR and saves the same pairing payload as a PNG. It includes a random Mac id, public key, one-time code, and the configured relay origin. Approvals use the existing signature verifier; only local allowlisted fixes run, followed by a recheck and result post. Failed posts retry in memory while the process runs.
+`daemon-doctor pair --out pairing.png` prints a terminal QR and saves the same pairing payload as a PNG. It includes a random Mac id, public key, one-time code, and the configured relay origin. Approvals use the existing signature verifier; only local allowlisted fixes run, followed by a recheck and result post. Failed posts retry in memory while the process runs. Mailbox pages contain at most 100 records. Each intake polls within a shared 750 ms budget, then retries only one queued delivery with a 250 ms deadline; a failed retry moves to the back of the queue.
 
 ## 9. Repo layout
 ```

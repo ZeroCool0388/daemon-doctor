@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { NoopPush } from "./push";
 
 const MAX_BODY = 4096;
+const MAX_PAGE = 100;
 const BOXES = new Set(["pairing", "alerts", "approvals", "results"]);
 
 type Stored = Record<string, unknown>;
@@ -87,11 +88,17 @@ export class Mailbox extends DurableObject {
 
   private list(kind: string, url: URL): Response {
     const after = Math.max(0, Math.floor(Number(url.searchParams.get("after") ?? "0") || 0));
+    const requested = Number(url.searchParams.get("limit") ?? MAX_PAGE);
+    if (!Number.isSafeInteger(requested) || requested < 1) {
+      return text("bad limit", 400);
+    }
+    const limit = Math.min(requested, MAX_PAGE);
     const events = [];
     const rows = this.ctx.storage.sql.exec<EventRow>(
-      "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC",
+      "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?",
       kind,
       after,
+      limit + 1,
     );
     for (const row of rows) {
       events.push({
@@ -100,7 +107,9 @@ export class Mailbox extends DurableObject {
         body: JSON.parse(row.body) as Stored,
       });
     }
-    return json({ events });
+    const hasMore = events.length > limit;
+    if (hasMore) events.pop();
+    return json({ events, next_after: events.at(-1)?.id ?? after, has_more: hasMore });
   }
 
   private socket(request: Request): Response {

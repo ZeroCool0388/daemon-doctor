@@ -428,16 +428,16 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		for _, event := range events {
-			code, key, err := security.UnmarshalPairing(event.Body)
+			pairing, err := security.UnmarshalPairing(event.Body)
 			if err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				continue
 			}
-			if err := sec.AcceptPairing(time.Now(), code, key); err != nil {
+			if err := sec.AcceptPairing(time.Now(), pairing); err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				continue
 			}
-			fmt.Fprintf(stdout, "paired %s\n", security.Fingerprint(key))
+			fmt.Fprintf(stdout, "paired %s\n", security.Fingerprint(pairing.PublicKey))
 			return 0
 		}
 		timer := time.NewTimer(time.Second)

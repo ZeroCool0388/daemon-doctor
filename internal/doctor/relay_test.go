@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -69,11 +70,77 @@ func (b *fakeRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, row := range b.rows {
 			if row.Kind == kind && row.ID > after {
 				events = append(events, row)
+				if len(events) == 100 {
+					break
+				}
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": events})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHostilePairingRelayInProcess(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	mac, err := security.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := mac.BeginPairing(now, "https://your-relay.example.workers.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, _, _, err := security.ParsePayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attacker, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := pairingFor(t, mac, secret, phone)
+	registration.PublicKey = attacker
+	body, err := security.MarshalPairing(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box := &fakeRelay{macID: mac.MacID()}
+	client := inProcessRelay(t, box)
+	ctrl := &signalCounter{}
+	d := newLocalDoctor(t, dir, mac, client.BaseURL, ctrl, openBook(t, dir), now)
+	d.UseRelay(mac, client)
+	id := security.NewID()
+	if err := mac.RecordAlert(security.Raised{ID: id, ServiceID: "example-desktop-app", Actions: []string{"restart"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := security.Sign(private, security.Approval{MacID: mac.MacID(), AlertID: id, FixID: "restart", Nonce: security.NewID(), Expires: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := security.MarshalApproval(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, raw := range map[string][]byte{"pairing": body, "approvals": approval} {
+		if err := client.Post(context.Background(), mac.MacID(), kind, json.RawMessage(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	signals, launches := ctrl.counts()
+	if signals != 0 || launches != 0 || len(mac.Phones()) != 0 {
+		t.Fatal("relay key substitution reached a fix")
+	}
+	if !sawStatus(t, d.Log.Path(), string(security.ReasonBadSignature)) || !sawStatus(t, d.Log.Path(), string(security.ReasonUnknownKey)) {
+		t.Fatal("missing pairing or approval refusal")
 	}
 }
 

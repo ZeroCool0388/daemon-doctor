@@ -287,7 +287,7 @@ func pairMac(t *testing.T, dir string, now time.Time) (*security.Store, ed25519.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mac.AcceptPairing(now, code, pub); err != nil {
+	if err := mac.AcceptPairing(now, pairingFor(t, mac, code, pub)); err != nil {
 		t.Fatal(err)
 	}
 	return mac, priv
@@ -419,4 +419,13 @@ func addCommand(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func pairingFor(t testing.TB, mac *security.Store, secret string, phone ed25519.PublicKey) security.Pairing {
+	t.Helper()
+	msg, err := security.NewPairing(mac.MacID(), mac.PublicKey(), secret, phone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
 }

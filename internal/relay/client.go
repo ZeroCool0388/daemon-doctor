@@ -32,6 +32,7 @@ type page struct {
 
 const maxBody = 4096 // Matches relay/src/mailbox.ts.
 const maxResponse = 1 << 20
+const pageSize = 100 // At most 100 worker bodies of 4096 bytes per response.
 
 var macIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
@@ -95,7 +96,8 @@ func (c *Client) Post(ctx context.Context, macID, kind string, body any) error {
 	return nil
 }
 
-// Poll reads new events of one kind. The cursor stays on this client.
+// Poll reads at most one bounded page of new events. Later calls continue
+// from the last event; a new client can safely replay a backlog from zero.
 func (c *Client) Poll(ctx context.Context, macID, kind string) ([]Event, error) {
 	if err := mailboxOK(macID, kind); err != nil {
 		return nil, err
@@ -103,7 +105,7 @@ func (c *Client) Poll(ctx context.Context, macID, kind string) ([]Event, error) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	after := c.after[macID+"/"+kind]
-	endpoint := fmt.Sprintf("%s?after=%d", c.url(macID, kind), after)
+	endpoint := fmt.Sprintf("%s?after=%d&limit=%d", c.url(macID, kind), after, pageSize)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -122,6 +124,9 @@ func (c *Client) Poll(ctx context.Context, macID, kind string) ([]Event, error) 
 	}
 	if payload.Events == nil {
 		return nil, fmt.Errorf("relay response must contain an events array")
+	}
+	if len(payload.Events) > pageSize {
+		return nil, fmt.Errorf("relay response exceeds the page limit")
 	}
 	maxID := after
 	var events []Event

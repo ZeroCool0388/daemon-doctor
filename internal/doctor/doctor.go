@@ -53,6 +53,8 @@ type outgoing struct {
 }
 
 const relayPollInterval = 5 * time.Second
+const relayPollBudget = 750 * time.Millisecond
+const relayPostBudget = 250 * time.Millisecond
 
 // New validates plug-ins and returns a doctor.
 // reg may be nil to use the built-in checks. now may be nil to use time.Now.
@@ -577,12 +579,13 @@ func (d *Doctor) intake(ctx context.Context) {
 	if d.relay == nil || d.sec == nil {
 		return
 	}
-	d.flush(ctx)
+	pollCtx, cancel := context.WithTimeout(ctx, relayPollBudget)
+	defer cancel()
 	for _, kind := range []string{"pairing", "approvals"} {
-		if ctx.Err() != nil {
-			return
+		if pollCtx.Err() != nil {
+			break
 		}
-		events, err := d.relay.Poll(ctx, d.sec.MacID(), kind)
+		events, err := d.relay.Poll(pollCtx, d.sec.MacID(), kind)
 		if err != nil {
 			_ = d.logNote(err.Error())
 			continue
@@ -591,6 +594,8 @@ func (d *Doctor) intake(ctx context.Context) {
 			d.handle(ctx, event)
 		}
 	}
+	// Approval polling takes priority over one bounded delivery retry.
+	d.flush(ctx)
 }
 
 func (d *Doctor) handle(ctx context.Context, event relay.Event) {
@@ -599,16 +604,16 @@ func (d *Doctor) handle(ctx context.Context, event relay.Event) {
 		if d.sec == nil {
 			return
 		}
-		code, key, err := security.UnmarshalPairing(event.Body)
+		pairing, err := security.UnmarshalPairing(event.Body)
 		if err != nil {
 			_ = d.logRefusal("", err)
 			return
 		}
-		if err := d.sec.AcceptPairing(d.now(), code, key); err != nil {
+		if err := d.sec.AcceptPairing(d.now(), pairing); err != nil {
 			_ = d.logRefusal("", err)
 			return
 		}
-		_ = d.logAccepted("", "", security.Fingerprint(key))
+		_ = d.logAccepted("", "", security.Fingerprint(pairing.PublicKey))
 	case "approvals":
 		_, _ = d.applyApproval(ctx, event.Body, false)
 	}
@@ -634,18 +639,22 @@ func (d *Doctor) publishResult(ctx context.Context, alertID, fixID string, res f
 // Failed deliveries stay in memory for the next poll. Only delivery is
 // retried; an approval's persisted nonce prevents running its fix twice.
 func (d *Doctor) send(ctx context.Context, kind string, body any) {
-	if err := d.relay.Post(ctx, d.sec.MacID(), kind, body); err != nil {
+	postCtx, cancel := context.WithTimeout(ctx, relayPostBudget)
+	defer cancel()
+	if err := d.relay.Post(postCtx, d.sec.MacID(), kind, body); err != nil {
 		_ = d.logNote(err.Error())
 		d.outbox = append(d.outbox, outgoing{kind: kind, body: body})
 	}
 }
 
 func (d *Doctor) flush(ctx context.Context) {
-	pending := d.outbox
-	d.outbox = nil
-	for _, item := range pending {
-		d.send(ctx, item.kind, item.body)
+	if len(d.outbox) == 0 || ctx.Err() != nil {
+		return
 	}
+	item := d.outbox[0]
+	d.outbox[0] = outgoing{}
+	d.outbox = d.outbox[1:]
+	d.send(ctx, item.kind, item.body)
 }
 
 func (d *Doctor) logRefusal(alertID string, err error) error {

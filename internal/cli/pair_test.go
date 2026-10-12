@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"image/png"
 	"net/http"
@@ -44,7 +43,19 @@ func TestPairPNGAndConfiguredRelay(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"events": []any{map[string]any{"id": 1, "kind": "pairing", "body": map[string]string{"code": pending.Code, "public_key": base64.RawURLEncoding.EncodeToString(pub)}}}})
+		mac, err := security.Open(dir)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(500)
+			return
+		}
+		body, err := security.MarshalPairing(pairingFor(t, mac, pending.Code, pub))
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(500)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": []any{map[string]any{"id": 1, "kind": "pairing", "body": json.RawMessage(body)}}})
 	}))
 	defer srv.Close()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
