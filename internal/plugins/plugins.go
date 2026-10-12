@@ -1,6 +1,7 @@
 // Package plugins loads per-service plug-in files (YAML or TOML).
-// A plug-in names the process to watch, lists health checks cheapest first,
-// and approves fix actions from a fixed allowlist.
+// A plug-in names the process to watch, or it watches a launchd job or a
+// file and names no process. It lists health checks cheapest first and
+// approves fix actions from a fixed allowlist.
 package plugins
 
 import (
@@ -262,8 +263,6 @@ func Validate(p *Plugin, costs map[string]int) error {
 		if p.Process.Match != "" || p.Process.CmdContains != "" || p.Process.CmdRegex != "" {
 			return fmt.Errorf("a host plug-in does not take a process match")
 		}
-	} else if !processConfigured(p.Process) {
-		return fmt.Errorf("process match is required")
 	}
 	if len(p.Checks) == 0 {
 		return fmt.Errorf("at least one check is required")
@@ -301,13 +300,17 @@ func Validate(p *Plugin, costs map[string]int) error {
 	}
 	if !p.Host {
 		_, sawJob := seenType[CheckLaunchdJob]
+		_, sawFile := seenType[CheckFileRecent]
+		if !processConfigured(p.Process) && !sawJob && !sawFile {
+			return fmt.Errorf("process match is required")
+		}
 		switch {
 		case sawProcess && p.Checks[0].Type != CheckProcessRunning:
 			return fmt.Errorf("process_running must be the first check")
-		case !sawProcess && !sawJob:
-			return fmt.Errorf("process_running or launchd_job is required")
-		case !sawProcess && p.Checks[0].Type != CheckLaunchdJob:
-			return fmt.Errorf("launchd_job must be the first check when process_running is absent")
+		case !sawProcess && !sawJob && !sawFile:
+			return fmt.Errorf("process_running, launchd_job, or file_recent is required")
+		case !sawProcess && p.Checks[0].Type != CheckLaunchdJob && p.Checks[0].Type != CheckFileRecent:
+			return fmt.Errorf("launchd_job or file_recent must be the first check")
 		}
 		if _, sawFlags := seenType[CheckLaunchedWithFlags]; sawFlags && !sawProcess {
 			return fmt.Errorf("launched_with_flags needs process_running")
@@ -405,7 +408,7 @@ func validateCheck(check *Check) error {
 			return err
 		}
 		check.Label = label
-		if _, err := parseMaxAge(check.MaxAge); err != nil {
+		if err := optionalMaxAge(check.MaxAge); err != nil {
 			return err
 		}
 		if err := unexpected(check, "label", "max_age"); err != nil {
@@ -577,6 +580,14 @@ func normalizeProcess(m *ProcessMatch) error {
 	return nil
 }
 
+func optionalMaxAge(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	_, err := parseMaxAge(raw)
+	return err
+}
+
 func parseMaxAge(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -592,7 +603,9 @@ func parseMaxAge(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+// A label is one launchctl argument. Spaces are allowed. Slashes are not,
+// so the label stays a single path segment under gui/<uid>/.
+var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$`)
 
 func cleanLabel(label string) (string, error) {
 	label = strings.TrimSpace(label)

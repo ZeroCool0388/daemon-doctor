@@ -12,9 +12,6 @@ interval: 30s
 #   cmd_regex: "example-gateway/server\\.js"
 # checks:
 #   - type: process_running
-#   - type: launchd_job
-#     label: com.example.health
-#     max_age: 10m
 #   - type: launched_with_flags
 #     flags: ["--config"]
 #   - type: file_recent
@@ -25,6 +22,16 @@ interval: 30s
 #     kind: restart
 #     launcher: /opt/example-launch
 #     args: ["--config", "/opt/example.yaml"]
+# A periodic job or a file check can stand alone, with no process match.
+# max_age on launchd_job is optional: a last exit status of 0 passes without it.
+# A label may contain spaces. It is one argument.
+# checks:
+#   - type: launchd_job
+#     label: Example Health
+#   - type: file_recent
+#     path: /tmp/example-heartbeat
+#     max_age: 5m
+# fixes:
 #   launchctl_kickstart:
 #     kind: launchctl_kickstart
-#     label: com.example.health
+#     label: Example Health

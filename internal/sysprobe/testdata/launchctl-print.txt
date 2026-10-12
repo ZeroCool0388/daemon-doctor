@@ -1,0 +1,37 @@
+gui/501/Example Health = {
+	active count = 0
+	path = /Users/example/Library/LaunchAgents/com.example.health.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /usr/bin/true
+	arguments = {
+		/usr/bin/true
+	}
+
+	stdout path = /tmp/Example Health.out
+	stderr path = /tmp/Example Health.err
+	inherited environment = {
+		SSH_AUTH_SOCK => /private/tmp/com.apple.launchd.example/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		XPC_SERVICE_NAME => com.example.health
+	}
+
+	domain = gui/501 [100019]
+	minimum runtime = 30
+	exit timeout = 5
+	runs = 4
+	last exit code = 0
+
+	spawn type = daemon (3)
+
+	run interval = 300 seconds
+
+	properties = inferred program
+}

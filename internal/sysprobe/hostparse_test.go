@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTopCPUAndMemoryBreakTiesByPID(t *testing.T) {
@@ -231,8 +232,66 @@ gui/501/com.example.health = {
 	if !ok || bad.ExitCode != 2 || bad.LastRun.UTC().Format("15:04") != "12:00" {
 		t.Fatalf("%+v", bad)
 	}
+	named, ok := ParseLaunchctlPrint("last exit code = 78: EX_CONFIG\n")
+	if !ok || !named.ExitKnown || named.ExitCode != 78 {
+		t.Fatalf("%+v ok %v", named, ok)
+	}
 	if _, ok := ParseLaunchctlPrint("last exit code = (never exited)\n"); ok {
 		t.Fatal("a job that has never exited should be unknown")
+	}
+}
+
+func TestParseRealLaunchctlPrint(t *testing.T) {
+	// Field names and layout are from macOS `launchctl print`. The label and
+	// paths are examples. The gui/501 line is the domain launchctl prints;
+	// this program builds its own target from the uid at runtime.
+	text, err := os.ReadFile("testdata/launchctl-print.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, ok := ParseLaunchctlPrint(string(text))
+	if !ok {
+		t.Fatal("fixture was not recognized")
+	}
+	if !job.ExitKnown || job.ExitCode != 0 || job.LastRunKnown {
+		t.Fatalf("exit %+v", job)
+	}
+	if !job.RunsKnown || job.Runs != 4 {
+		t.Fatalf("runs %+v", job)
+	}
+	if !job.IntervalKnown || job.Interval != 5*time.Minute {
+		t.Fatalf("interval %s", job.Interval)
+	}
+	if job.StdoutPath != "/tmp/Example Health.out" {
+		t.Fatalf("stdout %q", job.StdoutPath)
+	}
+}
+
+func TestGUIServiceTargetUsesRuntimeUID(t *testing.T) {
+	got := GUIServiceTarget("Example Health")
+	parts := strings.SplitN(got, "/", 3)
+	if len(parts) != 3 || parts[0] != "gui" || parts[1] != strconv.Itoa(os.Getuid()) || parts[2] != "Example Health" {
+		t.Fatalf("target %q", got)
+	}
+}
+
+func TestStampStdout(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/Example Health.out"
+	if err := os.WriteFile(path, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := stampStdout(LaunchdJob{StdoutPath: path})
+	if !job.StdoutKnown || job.StdoutMissing || !job.StdoutMod.Equal(info.ModTime()) {
+		t.Fatalf("%+v", job)
+	}
+	missing := stampStdout(LaunchdJob{StdoutPath: dir + "/missing.out"})
+	if !missing.StdoutKnown || !missing.StdoutMissing {
+		t.Fatalf("%+v", missing)
 	}
 }
 

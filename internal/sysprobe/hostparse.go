@@ -430,7 +430,9 @@ func ApplyExePaths(procs []Process, paths map[int]string) []Process {
 }
 
 // ParseLaunchctlPrint reads `launchctl print` text for one job.
-// It looks for the last exit code and the last exit time.
+// It reads the last exit code, the runs count, the run interval, and the
+// stdout path. A last exit time is kept when a print includes one.
+// A job that has never exited, and that has none of those fields, is unknown.
 func ParseLaunchctlPrint(text string) (LaunchdJob, bool) {
 	var job LaunchdJob
 	for _, line := range strings.Split(text, "\n") {
@@ -449,9 +451,25 @@ func ParseLaunchctlPrint(text string) (LaunchdJob, bool) {
 				job.LastRun = ts
 				job.LastRunKnown = true
 			}
+		case "runs":
+			if n, known := parseRuns(val); known {
+				job.Runs = n
+				job.RunsKnown = true
+			}
+		case "run interval":
+			if d, known := parseRunInterval(val); known {
+				job.Interval = d
+				job.IntervalKnown = true
+			}
+		case "stdout path":
+			path := strings.TrimSpace(val)
+			if path != "" && path != "-" {
+				job.StdoutPath = path
+			}
 		}
 	}
-	return job, job.ExitKnown || job.LastRunKnown
+	found := job.ExitKnown || job.LastRunKnown || job.RunsKnown || job.IntervalKnown || job.StdoutPath != ""
+	return job, found
 }
 
 func splitEq(line string) (string, string, bool) {
@@ -473,11 +491,51 @@ func parseExitCode(val string) (int, bool) {
 	if len(fields) == 0 {
 		return 0, false
 	}
-	n, err := strconv.Atoi(fields[0])
+	token := strings.TrimRight(fields[0], ":")
+	n, err := strconv.Atoi(token)
 	if err != nil {
 		return 0, false
 	}
 	return n, true
+}
+
+func parseRuns(val string) (int, bool) {
+	fields := strings.Fields(strings.TrimSpace(val))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(fields[0])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseRunInterval(val string) (time.Duration, bool) {
+	fields := strings.Fields(strings.TrimSpace(val))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	unit := "seconds"
+	if len(fields) > 1 {
+		unit = strings.ToLower(strings.TrimRight(fields[1], ".,"))
+	}
+	var d time.Duration
+	switch unit {
+	case "second", "seconds", "sec", "secs", "s":
+		d = time.Duration(n) * time.Second
+	case "minute", "minutes", "min", "mins", "m":
+		d = time.Duration(n) * time.Minute
+	case "hour", "hours", "h":
+		d = time.Duration(n) * time.Hour
+	default:
+		return 0, false
+	}
+	return d, true
 }
 
 func parseLaunchdTime(val string) (time.Time, bool) {

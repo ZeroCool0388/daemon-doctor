@@ -53,7 +53,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{byType: map[string]Type{}}
 	r.mustRegister(processCheck{})
-	r.mustRegister(launchdCheck{})
+	r.mustRegister(&launchdCheck{})
 	r.mustRegister(sleepCheck{})
 	r.mustRegister(networkCheck{})
 	r.mustRegister(diskCheck{})

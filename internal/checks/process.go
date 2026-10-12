@@ -16,12 +16,13 @@ func (processCheck) Cost() int    { return plugins.BuiltinCosts()[plugins.CheckP
 
 func (processCheck) Run(in Input) Outcome {
 	found := sysprobe.MatchingSpec(in.Snap, in.Plugin.Process.Spec())
+	name := watchedName(in)
 	if len(found) == 0 {
 		return Outcome{
 			Type:       plugins.CheckProcessRunning,
 			NotRunning: true,
 			Failed:     true,
-			Detail:     fmt.Sprintf("process %s is not running", in.Plugin.Process.Match),
+			Detail:     fmt.Sprintf("process %s is not running", name),
 		}
 	}
 	pids := make([]string, len(found))
@@ -31,6 +32,18 @@ func (processCheck) Run(in Input) Outcome {
 	return Outcome{
 		Type:    plugins.CheckProcessRunning,
 		Healthy: true,
-		Detail:  fmt.Sprintf("process %s is running (pid %s)", in.Plugin.Process.Match, strings.Join(pids, ", ")),
+		Detail:  fmt.Sprintf("process %s is running (pid %s)", name, strings.Join(pids, ", ")),
 	}
+}
+
+// watchedName is the process match, or the plug-in display name when the
+// plug-in matches only by a command-line substring or expression.
+func watchedName(in Input) string {
+	if name := strings.TrimSpace(in.Plugin.Process.Match); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(in.Plugin.Name); name != "" {
+		return name
+	}
+	return "service"
 }
