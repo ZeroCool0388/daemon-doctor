@@ -9,6 +9,20 @@ function url(id: string, box: string): string {
   return `https://relay.example.invalid/v1/macs/${id}/${box}`;
 }
 
+describe("health", () => {
+  it("answers GET /health with ok", async () => {
+    const res = await SELF.fetch("https://relay.example.invalid/health");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("refuses POST /health", async () => {
+    const res = await SELF.fetch("https://relay.example.invalid/health", { method: "POST", body: "{}" });
+    expect(res.status).toBe(405);
+  });
+});
+
 describe("mailbox", () => {
   it("forwards an approval unchanged", async () => {
     const body = {
