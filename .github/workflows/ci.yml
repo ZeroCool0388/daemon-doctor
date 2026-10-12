@@ -20,7 +20,8 @@ jobs:
       - name: go test
         run: go test -count=1 -json ./... > "$RUNNER_TEMP/gotest.json"
       - name: go test summary
-        run: python3 - << 'PY'
+        run: |
+          python3 - << 'PY'
           import json, os, sys
           path = os.environ["RUNNER_TEMP"] + "/gotest.json"
           passes = []
@@ -75,7 +76,8 @@ jobs:
         working-directory: android
         run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
       - name: Count Android unit tests
-        run: python3 - << 'PY'
+        run: |
+          python3 - << 'PY'
           import glob, sys, xml.etree.ElementTree as ET
           total = fails = errors = skipped = 0
           for path in sorted(glob.glob("android/**/TEST-*.xml", recursive=True)):
