@@ -16,12 +16,10 @@ import (
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
-	"github.com/coder/websocket"
 )
 
 type signalCounter struct {
@@ -149,26 +147,23 @@ func TestHostileRelay(t *testing.T) {
 	}
 }
 
-func TestOutboundWatchRunsSignedApproval(t *testing.T) {
+func TestRunPollsApprovalsBetweenChecks(t *testing.T) {
+	testRunPollsApprovalsBetweenChecks(t, false)
+}
+
+func TestRunPollsApprovalsBetweenChecksInProcess(t *testing.T) {
+	testRunPollsApprovalsBetweenChecks(t, true)
+}
+
+func testRunPollsApprovalsBetweenChecks(t *testing.T, inProcess bool) {
 	now := time.Now().UTC().Truncate(time.Second)
 	dir := t.TempDir()
 	mac, phone := pairMac(t, dir, now)
 	alertID := security.NewID()
-	if err := mac.RecordAlert(security.Raised{
-		ID:        alertID,
-		ServiceID: "example-desktop-app",
-		Actions:   []string{plugins.FixRestart},
-		At:        now,
-	}); err != nil {
+	if err := mac.RecordAlert(security.Raised{ID: alertID, ServiceID: "example-desktop-app", Actions: []string{plugins.FixRestart}, At: now}); err != nil {
 		t.Fatal(err)
 	}
-	signed, err := security.Sign(phone, security.Approval{
-		MacID:   mac.MacID(),
-		AlertID: alertID,
-		FixID:   plugins.FixRestart,
-		Nonce:   security.NewID(),
-		Expires: now.Add(5 * time.Minute),
-	})
+	signed, err := security.Sign(phone, security.Approval{MacID: mac.MacID(), AlertID: alertID, FixID: plugins.FixRestart, Nonce: security.NewID(), Expires: now.Add(5 * time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,86 +171,89 @@ func TestOutboundWatchRunsSignedApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame, err := json.Marshal(relay.Event{ID: 1, Kind: "approvals", Body: raw})
-	if err != nil {
-		t.Fatal(err)
+	var polls int
+	results := make(chan struct{}, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			if strings.HasSuffix(r.URL.Path, "/results") {
+				results <- struct{}{}
+			}
+			_, _ = w.Write([]byte(`{"stored":true}`))
+			return
+		}
+		events := []relay.Event{}
+		if strings.HasSuffix(r.URL.Path, "/approvals") {
+			polls++
+			if polls > 1 {
+				events = append(events, relay.Event{ID: 1, Kind: "approvals", Body: raw})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": events})
+	})
+	var client *relay.Client
+	if inProcess {
+		client, err = relay.New("https://your-relay.example.workers.dev")
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.HTTP.Transport = handlerTransport{handler: handler}
+	} else {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		client, err = relay.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
+	ctrl := &signalCounter{}
+	d := newLocalDoctor(t, dir, mac, client.BaseURL, ctrl, openBook(t, dir), now)
+	d.UseRelay(mac, client)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	incoming := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/ws") {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"events":[]}`))
-			return
-		}
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close(websocket.StatusNormalClosure, "")
-		var body []byte
-		select {
-		case body = <-incoming:
-		case <-ctx.Done():
-			return
-		}
-		writeCtx, stop := context.WithTimeout(ctx, 2*time.Second)
-		defer stop()
-		_ = conn.Write(writeCtx, websocket.MessageText, body)
-		<-ctx.Done()
-	}))
-	defer srv.Close()
-	ctrl := &signalCounter{}
-	book := openBook(t, dir)
-	d := newLocalDoctor(t, dir, mac, srv.URL, ctrl, book, now)
-	incoming <- frame
 	done := make(chan error, 1)
-	go func() {
-		done <- d.Run(ctx, time.Hour, nil, func(err error) {
-			t.Errorf("cycle: %v", err)
-		})
-	}()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		signals, launches := ctrl.counts()
-		if launches != 0 {
-			t.Fatalf("launches %d", launches)
-		}
-		if signals > 0 {
-			cancel()
-			select {
-			case <-done:
-			case <-time.After(2 * time.Second):
-				t.Fatal("run did not stop")
-			}
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	go func() { done <- d.Run(ctx, time.Hour, nil, func(err error) { t.Errorf("cycle: %v", err) }) }()
+	select {
+	case <-results:
+	case <-time.After(8 * time.Second):
+		t.Fatal("approval was not polled between checks")
 	}
-	t.Fatal("watch did not apply the signed approval")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run did not stop")
+	}
+	signals, launches := ctrl.counts()
+	if signals != 2 || launches != 0 {
+		t.Fatalf("signals %d launches %d", signals, launches)
+	}
 }
 
-func TestPushHookAndRelayFailureStayLocal(t *testing.T) {
+func TestRelayFailureStaysLocal(t *testing.T) {
 	dir := t.TempDir()
 	mac, err := security.LoadOrCreate(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hook := &countHook{}
 	book := openBook(t, dir)
 	src := &sysprobe.MemSource{}
 	d, err := New([]plugins.Plugin{loadExample(t)}, src, &signalCounter{}, book, nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad, err := relay.New("http://relay.example.invalid")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	bad, err := relay.New(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad.HTTP.Timeout = 200 * time.Millisecond
-	d.UseRelay(mac, bad, hook)
-	src.Set(sysprobe.Snapshot{})
+	d.UseRelay(mac, bad)
 	if _, err := d.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -263,24 +261,12 @@ func TestPushHookAndRelayFailureStayLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindDown {
+	if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindDown || rows[0].Alerts[0].ID == "" {
 		t.Fatalf("rows %+v", rows)
 	}
-	if hook.n != 1 || rows[0].Alerts[0].ID == "" {
-		t.Fatalf("push %d alert %+v", hook.n, rows[0].Alerts[0])
+	if !sawKind(t, book.Path(), "relay") || len(d.outbox) != 1 {
+		t.Fatal("missing relay error or pending alert")
 	}
-	if !sawKind(t, book.Path(), "relay") {
-		t.Fatalf("log %s", mustRead(t, book.Path()))
-	}
-}
-
-type countHook struct {
-	n int
-}
-
-func (c *countHook) Deliver(context.Context, string, string, string) error {
-	c.n++
-	return nil
 }
 
 func pairMac(t *testing.T, dir string, now time.Time) (*security.Store, ed25519.PrivateKey) {
@@ -301,7 +287,7 @@ func pairMac(t *testing.T, dir string, now time.Time) (*security.Store, ed25519.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mac.AcceptPairing(now, code, pub); err != nil {
+	if err := mac.AcceptPairing(now, pairingFor(t, mac, code, pub)); err != nil {
 		t.Fatal(err)
 	}
 	return mac, priv
@@ -319,7 +305,7 @@ func newLocalDoctor(t *testing.T, dir string, mac *security.Store, base string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.UseRelay(mac, client, push.Stub{})
+	d.UseRelay(mac, client)
 	return d
 }
 
@@ -433,4 +419,13 @@ func addCommand(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func pairingFor(t testing.TB, mac *security.Store, secret string, phone ed25519.PublicKey) security.Pairing {
+	t.Helper()
+	msg, err := security.NewPairing(mac.MacID(), mac.PublicKey(), secret, phone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
 }

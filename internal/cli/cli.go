@@ -21,7 +21,6 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
@@ -62,7 +61,7 @@ func usage(w io.Writer) {
 Usage:
   daemon-doctor status [--config path]
   daemon-doctor run [--config path]
-  daemon-doctor pair [--list] [--config path]
+  daemon-doctor pair [--out path.png] [--list] [--config path]
   daemon-doctor fix --service id --action stop|restart|force-restart|launchctl_kickstart [--dry-run] [--yes] [--config path]
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
@@ -70,7 +69,8 @@ Usage:
 
 status prints one check of each plug-in.
 run repeats checks on the configured interval until interrupted.
-pair prints a one-time pairing payload and a terminal QR. The private key stays in the state directory.
+pair prints a one-time pairing payload and a terminal QR; --out also saves a PNG.
+The private key stays in the state directory.
 fix applies one allowlisted action after you answer y, then rechecks.
 fix --approval reads a signed phone approval. The signature is the approval.
 --process stop is only for a process named by an unwatched resource alert.
@@ -313,7 +313,7 @@ func fixApproval(path, approvalPath string, dryRun bool, stdout, stderr io.Write
 			return 1
 		}
 	}
-	d.UseRelay(sec, client, push.Stub{})
+	d.UseRelay(sec, client)
 	res, err := d.ApplyApproval(context.Background(), raw, dryRun)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -331,11 +331,16 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to config.yaml")
 	list := fs.Bool("list", false, "print paired phone fingerprints")
+	out := fs.String("out", "", "write the pairing QR to a new PNG file")
 	if err := fs.Parse(args); err != nil {
 		return flagCode(err)
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	if *list && *out != "" {
+		fmt.Fprintln(stderr, "pair --list does not take --out")
 		return 2
 	}
 	path, err := resolveConfig(*configPath)
@@ -359,6 +364,15 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if *out != "" {
+		if _, err := os.Lstat(*out); err == nil {
+			fmt.Fprintln(stderr, "error: pairing PNG already exists")
+			return 1
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+	}
 	sec, err := security.LoadOrCreate(cfg.StateDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -376,6 +390,13 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, qr)
+	if *out != "" {
+		if err := security.WriteQRPNG(payload, *out); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "QR saved to %s\n", *out)
+	}
 	if cfg.RelayURL == "" {
 		return 0
 	}
@@ -384,8 +405,10 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithTimeout(signalCtx, security.PairingTTL)
+	defer cancel()
 	deadline := time.Now().Add(security.PairingTTL)
 	for {
 		if !time.Now().Before(deadline) {
@@ -395,28 +418,36 @@ func pairCmd(args []string, stdout, stderr io.Writer) int {
 		events, err := client.Poll(ctx, sec.MacID(), "pairing")
 		if err != nil {
 			if ctx.Err() != nil {
+				if signalCtx.Err() == nil {
+					fmt.Fprintln(stderr, "error: pairing code expired")
+					return 1
+				}
 				return 0
 			}
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
 		for _, event := range events {
-			code, key, err := security.UnmarshalPairing(event.Body)
+			pairing, err := security.UnmarshalPairing(event.Body)
 			if err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				continue
 			}
-			if err := sec.AcceptPairing(time.Now(), code, key); err != nil {
+			if err := sec.AcceptPairing(time.Now(), pairing); err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				continue
 			}
-			fmt.Fprintf(stdout, "paired %s\n", security.Fingerprint(key))
+			fmt.Fprintf(stdout, "paired %s\n", security.Fingerprint(pairing.PublicKey))
 			return 0
 		}
 		timer := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if signalCtx.Err() == nil {
+				fmt.Fprintln(stderr, "error: pairing code expired")
+				return 1
+			}
 			return 0
 		case <-timer.C:
 		}
@@ -512,7 +543,7 @@ func attachRelay(d *doctor.Doctor, cfg config.Config) error {
 		if err != nil {
 			return nil
 		}
-		d.UseRelay(sec, nil, nil)
+		d.UseRelay(sec, nil)
 		return nil
 	}
 	sec, err := security.Open(cfg.StateDir)
@@ -523,7 +554,7 @@ func attachRelay(d *doctor.Doctor, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	d.UseRelay(sec, client, push.Stub{})
+	d.UseRelay(sec, client)
 	return nil
 }
 

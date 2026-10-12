@@ -182,7 +182,7 @@ func TestPairPrintsPayloadWithoutPrivateKey(t *testing.T) {
 		t.Fatalf("code %d stderr %s", code, stderr.String())
 	}
 	text := stdout.String()
-	if !strings.Contains(text, "payload daemon-doctor:1:") || !strings.Contains(text, "\n") {
+	if !strings.Contains(text, "payload daemon-doctor:2:") || !strings.Contains(text, "\n") {
 		t.Fatalf("stdout: %s", text)
 	}
 	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "identity.json"))
@@ -219,7 +219,7 @@ func TestPairPrintsPayloadWithoutPrivateKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sec.AcceptPairing(time.Now(), pairingCode, phone); err != nil {
+	if err := sec.AcceptPairing(time.Now(), pairingFor(t, sec, pairingCode, phone)); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
@@ -253,7 +253,7 @@ func TestFixApprovalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := sec.AcceptPairing(now, pairingCode, phonePub); err != nil {
+	if err := sec.AcceptPairing(now, pairingFor(t, sec, pairingCode, phonePub)); err != nil {
 		t.Fatal(err)
 	}
 	alertID := security.NewID()
@@ -323,4 +323,13 @@ func TestFixApprovalFile(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("smuggled command created a file")
 	}
+}
+
+func pairingFor(t testing.TB, mac *security.Store, secret string, phone ed25519.PublicKey) security.Pairing {
+	t.Helper()
+	msg, err := security.NewPairing(mac.MacID(), mac.PublicKey(), secret, phone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
 }

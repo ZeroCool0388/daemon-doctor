@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,10 +101,104 @@ func TestRejectsBadRelayURL(t *testing.T) {
 		"https://user:secret@relay.example.invalid",
 		"file:///tmp/relay",
 		"relay.example.invalid",
+		"https://your-relay.example.workers.dev/path",
+		"https://your-relay.example.workers.dev?token=value",
+		"https://your-relay.example.workers.dev#fragment",
 	} {
 		if _, err := New(raw); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
+	}
+}
+
+func TestPostRequiresStoredAcknowledgement(t *testing.T) {
+	for _, body := range []string{`{}`, `{"stored":false}`, `not json`, `{"stored":true} {}`} {
+		t.Run(body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+			defer srv.Close()
+			client, _ := New(srv.URL)
+			if err := client.Post(context.Background(), "0123456789abcdef0123456789abcdef", "alerts", map[string]string{"message": "example"}); err == nil {
+				t.Fatal("accepted an invalid acknowledgement")
+			}
+		})
+	}
+}
+
+func TestPostMatchesWorkerLimits(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; _, _ = w.Write([]byte(`{"stored":true}`)) }))
+	defer srv.Close()
+	client, _ := New(srv.URL)
+	id := "0123456789abcdef0123456789abcdef"
+	for _, body := range []any{nil, []string{"example"}, "example", map[string]string{"message": strings.Repeat("x", maxBody)}} {
+		if err := client.Post(context.Background(), id, "alerts", body); err == nil {
+			t.Fatalf("accepted body %T", body)
+		}
+	}
+	if err := client.Post(context.Background(), "bad-id", "alerts", map[string]string{}); err == nil {
+		t.Fatal("accepted bad Mac id")
+	}
+	if err := client.Post(context.Background(), id, "exec", map[string]string{}); err == nil {
+		t.Fatal("accepted unknown mailbox")
+	}
+	if calls != 0 {
+		t.Fatalf("sent %d invalid requests", calls)
+	}
+}
+
+func TestPollRejectsBadPageWithoutAdvancingCursor(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	for i, body := range []string{
+		`{}`, `{"events":null}`, `{"events":[]} {}`, `not json`,
+		`{"events":[{"id":7,"kind":"results","body":{}}]}`,
+		`{"events":[{"id":0,"kind":"approvals","body":{}}]}`,
+		`{"events":[{"id":7,"kind":"approvals","body":null}]}`,
+		`{"events":[{"id":7,"kind":"approvals","body":{}},{"id":6,"kind":"approvals","body":{}}]}`,
+		`{"events":[],"padding":"` + strings.Repeat("x", maxResponse) + `"}`,
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			var bad atomic.Bool
+			bad.Store(true)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("after") != "0" {
+					t.Error("cursor advanced after bad response")
+				}
+				if bad.Load() {
+					_, _ = w.Write([]byte(body))
+					return
+				}
+				_, _ = w.Write([]byte(`{"events":[{"id":1,"kind":"approvals","body":{}}]}`))
+			}))
+			defer srv.Close()
+			client, _ := New(srv.URL)
+			if _, err := client.Poll(context.Background(), id, "approvals"); err == nil {
+				t.Fatal("accepted bad response")
+			}
+			bad.Store(false)
+			if events, err := client.Poll(context.Background(), id, "approvals"); err != nil || len(events) != 1 {
+				t.Fatalf("retry: %+v %v", events, err)
+			}
+		})
+	}
+}
+
+func TestRelayCancellationAndHTTPFailure(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	client, _ := New(srv.URL)
+	if _, err := client.Poll(context.Background(), id, "approvals"); err == nil {
+		t.Fatal("accepted HTTP failure")
+	}
+	if err := client.Post(context.Background(), id, "results", map[string]string{}); err == nil {
+		t.Fatal("accepted HTTP failure")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.Poll(ctx, id, "approvals"); err == nil {
+		t.Fatal("ignored cancellation")
 	}
 }
 

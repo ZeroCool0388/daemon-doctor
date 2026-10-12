@@ -13,6 +13,26 @@ import java.io.File
 
 class CoreTest {
     @Test
+    fun pairingProofMatchesTheMacWithoutSendingSecret() {
+        val vector = Json.parseToJsonElement(File("../../testdata/pairing-vector.json").readText()).jsonObject
+        val payload = "daemon-doctor:2:${vector.string("mac_id")}:${vector.string("mac_public_key")}:${vector.string("secret")}:https://your-relay.example.workers.dev"
+        val parsed = requireNotNull(parsePairingPayload(payload))
+        val key = b64UrlDecode(vector.string("phone_public_key"))
+        val body = pairingBody(parsed, key)
+        val registration = Json.parseToJsonElement(body).jsonObject
+        assertEquals(setOf("pairing_id", "public_key", "proof"), registration.keys)
+        assertEquals(vector.string("pairing_id"), registration.string("pairing_id"))
+        assertEquals(vector.string("proof"), registration.string("proof"))
+        assertFalse(body.contains(parsed.code))
+        val otherKey = key.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val changed = Json.parseToJsonElement(pairingBody(parsed, otherKey)).jsonObject
+        assertFalse(registration.string("proof") == changed.string("proof"))
+        val otherMac = parsed.copy(macId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        assertFalse(body == pairingBody(otherMac, key))
+        assertNull(parsePairingPayload(payload.replace("daemon-doctor:2:", "daemon-doctor:1:")))
+    }
+
+    @Test
     fun crossLanguageVectors() {
         val file = File("../../testdata/approval-vectors.json")
         val root = Json.parseToJsonElement(file.readText()).jsonObject
@@ -63,7 +83,7 @@ class CoreTest {
 
     @Test
     fun pairingPayloadKeepsRelayColons() {
-        val payload = "daemon-doctor:1:0123456789abcdef0123456789abcdef:ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ:00112233445566778899aabbccddeeff:https://relay.example.invalid/mailbox"
+        val payload = "daemon-doctor:2:0123456789abcdef0123456789abcdef:ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ:00112233445566778899aabbccddeeff:https://relay.example.invalid/mailbox"
         val parsed = parsePairingPayload(payload)
         requireNotNull(parsed)
         assertEquals("https://relay.example.invalid/mailbox", parsed.relayUrl)
@@ -121,10 +141,12 @@ class CoreTest {
         val signer = SoftwareSigner(ByteArray(32) { 9 })
         val session = Session(signer, http) { 1_700_000_000 }
         session.setDemo(false)
-        val payload = "daemon-doctor:1:0123456789abcdef0123456789abcdef:${b64Url(ByteArray(32) { 1 })}:00112233445566778899aabbccddeeff:https://relay.example.invalid"
+        val payload = "daemon-doctor:2:0123456789abcdef0123456789abcdef:${b64Url(ByteArray(32) { 1 })}:00112233445566778899aabbccddeeff:https://relay.example.invalid"
         assertNull(session.pair(payload))
         assertEquals("POST", http.calls.single().method)
         assertTrue(http.calls.single().url.endsWith("/v1/macs/0123456789abcdef0123456789abcdef/pairing"))
+        assertFalse(http.calls.single().body!!.contains("00112233445566778899aabbccddeeff"))
+        assertTrue(http.calls.single().body!!.contains("\"proof\""))
         http.calls.clear()
         http.nextBody = """
             {"events":[{"id":1,"kind":"alerts","body":{"alert_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","service_id":"syncthing","service_name":"Syncthing","kind":"down","message":"Syncthing has stopped. It is not running.","actions":["restart","stop"],"process":"syncthing"}}]}
@@ -159,7 +181,7 @@ class CoreTest {
     fun leavingDemoDropsFakeAlerts() {
         val http = RecordingHttp()
         val session = Session(SoftwareSigner(ByteArray(32) { 3 }), http) { 1_700_000_000 }
-        val payload = "daemon-doctor:1:0123456789abcdef0123456789abcdef:${b64Url(ByteArray(32) { 1 })}:00112233445566778899aabbccddeeff:https://relay.example.invalid"
+        val payload = "daemon-doctor:2:0123456789abcdef0123456789abcdef:${b64Url(ByteArray(32) { 1 })}:00112233445566778899aabbccddeeff:https://relay.example.invalid"
         assertTrue(session.restore(payload))
         assertFalse(session.snapshot().demo)
         assertTrue(session.snapshot().paired)

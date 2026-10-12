@@ -84,7 +84,7 @@ class Session(
         val response = http.send(
             "POST",
             relayUrl(parsed.relayUrl, parsed.macId, "pairing"),
-            pairingBody(parsed.code, signer.publicKey),
+            pairingBody(parsed, signer.publicKey),
         )
         if (response.status != 200) {
             return "The relay did not accept the phone key (${response.status})."
@@ -105,7 +105,7 @@ class Session(
         }
         val response = http.send(
             "GET",
-            relayUrl(current.relayUrl, current.macId, "alerts") + "?after=$after",
+            relayUrl(current.relayUrl, current.macId, "alerts") + "?after=$after&limit=100",
             null,
         )
         if (response.status != 200) {

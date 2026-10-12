@@ -14,7 +14,6 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
-	"github.com/ZeroCool0388/daemon-doctor/internal/push"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
@@ -43,10 +42,19 @@ type Doctor struct {
 	now         func() time.Time
 	sec         *security.Store
 	relay       *relay.Client
-	push        push.Hook
+	outbox      []outgoing
 	lastStatus  map[string]string
 	lastSummary time.Time
 }
+
+type outgoing struct {
+	kind string
+	body any
+}
+
+const relayPollInterval = 5 * time.Second
+const relayPollBudget = 750 * time.Millisecond
+const relayPostBudget = 250 * time.Millisecond
 
 // New validates plug-ins and returns a doctor.
 // reg may be nil to use the built-in checks. now may be nil to use time.Now.
@@ -83,14 +91,13 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 	}, nil
 }
 
-// UseRelay attaches local approval state, the outbound mailbox client, and
-// the phone push hook. A nil client keeps alerts on this machine.
-func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client, hook push.Hook) {
+// UseRelay attaches local approval state and the outbound mailbox client.
+// A nil client keeps alerts on this machine.
+func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sec = sec
 	d.relay = client
-	d.push = hook
 }
 
 // Cycle takes one sample, runs every plug-in, and logs checks and alerts.
@@ -209,7 +216,6 @@ func (d *Doctor) Run(ctx context.Context, interval time.Duration, onCycle func([
 	if interval <= 0 {
 		return fmt.Errorf("interval must be positive")
 	}
-	d.startWatch(ctx)
 	tick := func() {
 		if ctx.Err() != nil {
 			return
@@ -231,12 +237,25 @@ func (d *Doctor) Run(ctx context.Context, interval time.Duration, onCycle func([
 	tick()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var relayTick <-chan time.Time
+	d.mu.Lock()
+	connected := d.relay != nil && d.sec != nil
+	d.mu.Unlock()
+	if connected {
+		poller := time.NewTicker(relayPollInterval)
+		defer poller.Stop()
+		relayTick = poller.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			tick()
+		case <-relayTick:
+			d.mu.Lock()
+			d.intake(ctx)
+			d.mu.Unlock()
 		}
 	}
 }
@@ -538,14 +557,7 @@ func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 			"actions":      actions,
 			"process":      a.Process,
 		}
-		if err := d.relay.Post(ctx, d.sec.MacID(), "alerts", body); err != nil {
-			_ = d.logNote(err.Error())
-		}
-	}
-	if d.push != nil && d.sec != nil {
-		if err := d.push.Deliver(ctx, d.sec.MacID(), a.ID, a.Message); err != nil {
-			_ = d.logNote(err.Error())
-		}
+		d.send(ctx, "alerts", body)
 	}
 	return nil
 }
@@ -567,19 +579,23 @@ func (d *Doctor) intake(ctx context.Context) {
 	if d.relay == nil || d.sec == nil {
 		return
 	}
+	pollCtx, cancel := context.WithTimeout(ctx, relayPollBudget)
+	defer cancel()
 	for _, kind := range []string{"pairing", "approvals"} {
-		events, err := d.relay.Poll(ctx, d.sec.MacID(), kind)
+		if pollCtx.Err() != nil {
+			break
+		}
+		events, err := d.relay.Poll(pollCtx, d.sec.MacID(), kind)
 		if err != nil {
 			_ = d.logNote(err.Error())
 			continue
 		}
 		for _, event := range events {
-			if event.Kind == "" {
-				event.Kind = kind
-			}
 			d.handle(ctx, event)
 		}
 	}
+	// Approval polling takes priority over one bounded delivery retry.
+	d.flush(ctx)
 }
 
 func (d *Doctor) handle(ctx context.Context, event relay.Event) {
@@ -588,42 +604,19 @@ func (d *Doctor) handle(ctx context.Context, event relay.Event) {
 		if d.sec == nil {
 			return
 		}
-		code, key, err := security.UnmarshalPairing(event.Body)
+		pairing, err := security.UnmarshalPairing(event.Body)
 		if err != nil {
 			_ = d.logRefusal("", err)
 			return
 		}
-		if err := d.sec.AcceptPairing(d.now(), code, key); err != nil {
+		if err := d.sec.AcceptPairing(d.now(), pairing); err != nil {
 			_ = d.logRefusal("", err)
 			return
 		}
-		_ = d.logAccepted("", "", security.Fingerprint(key))
+		_ = d.logAccepted("", "", security.Fingerprint(pairing.PublicKey))
 	case "approvals":
 		_, _ = d.applyApproval(ctx, event.Body, false)
 	}
-}
-
-func (d *Doctor) startWatch(ctx context.Context) {
-	d.mu.Lock()
-	client := d.relay
-	sec := d.sec
-	d.mu.Unlock()
-	if client == nil || sec == nil {
-		return
-	}
-	macID := sec.MacID()
-	go func() {
-		err := client.Watch(ctx, macID, func(event relay.Event) {
-			d.mu.Lock()
-			d.handle(ctx, event)
-			d.mu.Unlock()
-		})
-		if err != nil && ctx.Err() == nil {
-			d.mu.Lock()
-			_ = d.logNote(err.Error())
-			d.mu.Unlock()
-		}
-	}()
 }
 
 func (d *Doctor) publishResult(ctx context.Context, alertID, fixID string, res fixes.Result, applyErr error) {
@@ -637,12 +630,31 @@ func (d *Doctor) publishResult(ctx context.Context, alertID, fixID string, res f
 	body := map[string]any{
 		"alert_id": alertID,
 		"fix_id":   fixID,
-		"fixed":    applyErr == nil && res.Fixed,
+		"fixed":    applyErr == nil && !res.DryRun && res.Fixed,
 		"message":  msg,
 	}
-	if err := d.relay.Post(ctx, d.sec.MacID(), "results", body); err != nil {
+	d.send(ctx, "results", body)
+}
+
+// Failed deliveries stay in memory for the next poll. Only delivery is
+// retried; an approval's persisted nonce prevents running its fix twice.
+func (d *Doctor) send(ctx context.Context, kind string, body any) {
+	postCtx, cancel := context.WithTimeout(ctx, relayPostBudget)
+	defer cancel()
+	if err := d.relay.Post(postCtx, d.sec.MacID(), kind, body); err != nil {
 		_ = d.logNote(err.Error())
+		d.outbox = append(d.outbox, outgoing{kind: kind, body: body})
 	}
+}
+
+func (d *Doctor) flush(ctx context.Context) {
+	if len(d.outbox) == 0 || ctx.Err() != nil {
+		return
+	}
+	item := d.outbox[0]
+	d.outbox[0] = outgoing{}
+	d.outbox = d.outbox[1:]
+	d.send(ctx, item.kind, item.body)
 }
 
 func (d *Doctor) logRefusal(alertID string, err error) error {

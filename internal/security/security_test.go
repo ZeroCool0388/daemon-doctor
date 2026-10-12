@@ -64,20 +64,20 @@ func TestIdentityAndPairingPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AcceptPairing(now, code, phonePub); err != nil {
+	if err := first.AcceptPairing(now, pairingFor(t, first, code, phonePub)); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AcceptPairing(now, code, phonePub); err != nil {
+	if err := first.AcceptPairing(now, pairingFor(t, first, code, phonePub)); err != nil {
 		t.Fatal(err)
 	}
 	other, _, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AcceptPairing(now, code, other); err == nil {
+	if err := first.AcceptPairing(now, pairingFor(t, first, code, other)); err == nil {
 		t.Fatal("spent pairing code was accepted for a second phone")
 	}
-	if err := first.AcceptPairing(now.Add(PairingTTL), "0123456789abcdef0123456789abcdef", phonePub); err == nil {
+	if err := first.AcceptPairing(now.Add(PairingTTL), pairingFor(t, first, "0123456789abcdef0123456789abcdef", phonePub)); err == nil {
 		t.Fatal("expired pairing code was accepted")
 	}
 	opened, err := Open(dir)
@@ -188,7 +188,7 @@ func TestApprovals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mac.AcceptPairing(now, code, secondPub); err != nil {
+	if err := mac.AcceptPairing(now, pairingFor(t, mac, code, secondPub)); err != nil {
 		t.Fatal(err)
 	}
 	fromSecond := approvalAt(t, secondPriv, mac.MacID(), alertID, "restart", now.Add(5*time.Minute))
@@ -275,7 +275,7 @@ func BenchmarkApprovalVerify(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	if err := mac.AcceptPairing(now, code, pub); err != nil {
+	if err := mac.AcceptPairing(now, pairingFor(b, mac, code, pub)); err != nil {
 		b.Fatal(err)
 	}
 	alertID := NewID()
@@ -329,7 +329,7 @@ func paired(t *testing.T, dir string) (*Store, ed25519.PrivateKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mac.AcceptPairing(now, code, pub); err != nil {
+	if err := mac.AcceptPairing(now, pairingFor(t, mac, code, pub)); err != nil {
 		t.Fatal(err)
 	}
 	return mac, priv
@@ -369,4 +369,13 @@ func errorAs(err error, target **Refusal) bool {
 	}
 	*target = refusal
 	return true
+}
+
+func pairingFor(t testing.TB, mac *Store, secret string, phone ed25519.PublicKey) Pairing {
+	t.Helper()
+	msg, err := NewPairing(mac.MacID(), mac.PublicKey(), secret, phone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
 }

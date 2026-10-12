@@ -1,6 +1,6 @@
 # Daemon Doctor
 
-Watches the apps and background services on a Mac, spots when one is down, stuck, or using the machine, explains it in plain English, and fixes it only after you approve. Fixed rules only: no AI in the decision or fix path.
+Watches the apps and background services on a Mac, spots when one is down, stuck, or using the machine, explains it in plain English, and fixes it only after you approve. Detection and fixes use fixed rules.
 
 **Status:** Phase 5 is in the tree. See [docs/plan.md](docs/plan.md) for the full plan.
 
@@ -31,7 +31,7 @@ No config file is required. The clock in the script jumps forward so the 5-minut
 
 ## Architecture
 
-The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed from this repo. The Mac push hook is an interface with a no-network stub and no keys.
+The Mac checks on a timer and only opens outbound connections. `relay/` is a Cloudflare Worker that stores alerts, approvals, and results for one Mac id. It uses a SQLite Durable Object as the mailbox. That is the Durable Object backend covered by the Workers free plan. The worker does not check signatures and it has no route that runs a command. It is not deployed from this repo. The Mac posts alerts to `/v1/macs/{mac_id}/alerts`, polls `/pairing` and `/approvals` with `?after={event_id}&limit=100`, and posts fix outcomes to `/results`. Polls run every five seconds independently of the check interval. Pages contain at most 100 records, so a backlog can be replayed after a restart. Polling has a shared 750 ms budget per intake. Alert and result posts have 250 ms deadlines; each intake retries at most one queued delivery after approval polling. Failed retries move to the back of the queue; the retry queue is not retained across restarts. The relay's phone push hook remains a stub; stored alerts are available to the Android poller.
 
 `android/` is a Kotlin and Jetpack Compose app. It pairs by reading the Mac's QR payload with CameraX and the on-device ML Kit barcode scanner, or by pasting that text when there is no camera. It generates an Ed25519 key in the Android Keystore when that algorithm is available, and otherwise keeps a 32-byte seed in the app's private files. It registers the public key with the relay. Alerts, a status row per service, and alert history are on screen. Fix it, Stop, Ignore, and Details use the allowlist the Mac already offered. Fix it prefers `restart`, then `force-restart`, then `launchctl_kickstart`. Stop is offered only when the alert includes `stop`. Ignore stays on the phone. A signed approval is posted only when demo mode is off. The signed text matches the Mac verifier: `daemon-doctor/approval/v1`, then `mac_id`, `alert_id`, `fix_id`, `nonce`, and `expires_unix`. `testdata/approval-vectors.json` holds one fixture produced by Go and one produced by the JDK. Go re-signs its own fixture and only verifies the JDK fixture. The Kotlin tests re-sign both.
 
@@ -53,7 +53,7 @@ flowchart LR
   W -- alert page --> Ph
 ```
 
-Plug-ins are YAML or TOML files. A service plug-in selects a process, or it watches a launchd job or a file and names no process. It lists checks cheapest first, stores plain-English messages, and approves `stop`, `restart`, `force-restart`, or `launchctl_kickstart`. `process.match` is an exact process name or executable path. `process.cmd_contains` is a command-line substring, and `process.cmd_regex` is a regular expression on the command line, so a service started by `node` can match its script without the whole command. When more than one of those is set, all of them have to match. A plug-in that matches only by `cmd_contains` or `cmd_regex` uses its display name in the running and not-running lines. `plugins/this-mac.yaml` is the host plug-in: sleep or wake, network, free disk space, memory pressure, and CPU. It does not name a process and it has no fixes. The other shipped plug-ins are a generic AI desktop app, Codex, ChatGPT, a local gateway, Proton Mail Bridge, Syncthing, Screen Sharing, and the fictional `example-desktop-app`.
+Plug-ins are YAML or TOML files. A service plug-in selects a process, or it watches a launchd job or a file and names no process. It lists checks cheapest first, stores plain-English messages, and approves `stop`, `restart`, `force-restart`, or `launchctl_kickstart`. `process.match` is an exact process name or executable path. `process.cmd_contains` is a command-line substring, and `process.cmd_regex` is a regular expression on the command line, so a service started by `node` can match its script without the whole command. When more than one of those is set, all of them have to match. A plug-in that matches only by `cmd_contains` or `cmd_regex` uses its display name in the running and not-running lines. `plugins/this-mac.yaml` is the host plug-in: sleep or wake, network, free disk space, memory pressure, and CPU. It does not name a process and it has no fixes. The other shipped plug-ins are a generic desktop app, Codex, ChatGPT, a local gateway, Proton Mail Bridge, Syncthing, Screen Sharing, and the fictional `example-desktop-app`.
 
 Checks read processes, established outbound TCP connections, launchd job results, file modification times, and host readings through a `Source` interface. Tests pass an in-memory source. On Linux the live source reads `/proc` and `df -P /`. On macOS it reads `ps`, `lsof`, `route`, `df`, `sysctl` or `memory_pressure`, and `pmset -g log`. The executable path comes from `ps -o comm=`, as its own column. It is not the first word of the command line, so an application path that contains spaces stays whole. A failed host command leaves that reading unknown. Unknown sleep or network does not raise an alert and does not pause anything.
 
@@ -72,9 +72,9 @@ Rules:
 
 `stop` and `restart` send TERM. `force-restart` sends KILL. The signal goes to the matched process and to its child processes, children first, so restarting an app also stops the helpers that app started. `stop` never launches a program. An optional launcher path on `restart` or `force-restart` is executed directly, with no shell. `args` on that fix are the fixed arguments from the plug-in file. `launchctl_kickstart` does not send a separate stop first. It runs `launchctl kickstart -k gui/<uid>/<label>`, where the label comes from the plug-in and may contain spaces, and the uid is the user running Daemon Doctor, read when the fix runs. The label is one argument. `--dry-run` skips the signal and the launch and still rechecks. A real fix on this machine asks for `y` in the terminal unless `--yes` is set. `fix --approval` reads a signed approval file. The signature is the approval. `--yes` does not skip that check. PID 1, this process, and its parent are never signalled. `fix --process` accepts only `stop`, and only for the process named by the latest unwatched CPU or memory alert in the local log.
 
-`daemon-doctor pair` creates an Ed25519 keypair in the state directory (mode 0600) and prints a one-time pairing payload plus a terminal QR. The payload is `daemon-doctor:1`, the Mac id, the Mac public key, a one-time code, and the relay URL when one is set. The private key is not in the payload. With no `relay_url`, pair saves the code and exits. With a relay URL, it polls until a phone posts its public key or the code expires (10 minutes). `pair --list` prints the fingerprint of each paired phone key, the first 8 bytes of SHA-256 as hex.
+`daemon-doctor pair` creates an Ed25519 keypair in the state directory (mode 0600) and prints a one-time pairing payload plus a terminal QR. `--out pairing.png` also saves that exact payload as a PNG with mode 0600 and refuses to overwrite an existing file. The payload is `daemon-doctor:2`, the Mac id, the Mac public key, a one-time code, and the relay URL when one is set. The private key is not in the payload. The phone authenticates its public key with HMAC-SHA256 using the QR secret; the proof binds the Mac id, Mac public key, pairing id (SHA-256 of the secret), and phone public key. Only the pairing id, phone public key, and proof go through the relay. With no `relay.url`, pair saves the code and exits. With a relay URL, it polls until a phone posts its public key or the code expires (10 minutes). `pair --list` prints the fingerprint of each paired phone key, the first 8 bytes of SHA-256 as hex.
 
-An approval is signed by a paired phone key. The signed text is the Mac id, alert id, fix id, a one-time nonce, and an expiry. The Mac accepts it only when the signature matches a paired key, the alert is one this Mac recorded, the fix id is one that alert offered, the expiry is still ahead and no further ahead than 10 minutes plus 1 minute of clock skew, and the nonce has not been used. A second use is refused. Unknown JSON fields are refused, so a command cannot ride along in the message. The fix that runs is the one stored with the alert.
+An approval is signed by a paired phone key. The signed text is the Mac id, alert id, fix id, a one-time nonce, and an expiry. The Mac accepts it only when the signature matches a paired key, the alert is one this Mac recorded, the fix id is one that alert offered, the expiry is still ahead and no further ahead than 10 minutes plus 1 minute of clock skew, and the nonce has not been used. A second use is refused, even by another already-open process: state refresh and nonce consumption share a file lock, and the nonce journal is synced before a fix can run. Unknown JSON fields are refused, so a command cannot ride along in the message. The fix that runs is the one stored with the alert.
 
 The local JSON-lines file records a check when that service's status changes, plus one hourly summary of the current status of each service. Alerts and fixes are still recorded when they happen. The file rotates at 1 MiB. The previous file is the same path with `.1` added. Values that look like tokens, passwords, or private keys are replaced with `[blanked]`.
 
@@ -90,7 +90,7 @@ mkdir -p ~/.config/daemon-doctor
 cp config.example.yaml ~/.config/daemon-doctor/config.yaml
 ```
 
-Edit that copy. `config.example.yaml` leaves `relay_url` unset, so the program stays local until you set one there. `launchd/com.example.daemon-doctor.plist` is an example LaunchAgent. Replace `/path/to/daemon-doctor` and `/path/to/config.yaml`, then load it as the normal user:
+Edit that copy. `config.example.yaml` leaves `relay.url` unset, so the program stays local until you set one there. `launchd/com.example.daemon-doctor.plist` is an example LaunchAgent. Replace `/path/to/daemon-doctor` and `/path/to/config.yaml`, then load it as the normal user:
 
 ```
 cp launchd/com.example.daemon-doctor.plist ~/Library/LaunchAgents/
@@ -109,7 +109,14 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-`GET /health` on the deployed worker returns `{"ok":true}`. Put the resulting base URL in `relay_url` in `~/.config/daemon-doctor/config.yaml` only. Leave it out of the repo.
+`GET /health` on the deployed worker returns `{"ok":true}`. Set the deployed origin in the local config (no path, query, credentials, or fragment):
+
+```yaml
+relay:
+  url: https://your-relay.example.workers.dev
+```
+
+The example above is a placeholder. Keep the actual URL in `~/.config/daemon-doctor/config.yaml`. The old `relay_url` key is still accepted for existing configs; use only one form. Run `daemon-doctor pair --out pairing.png` and scan the terminal QR or PNG within ten minutes, then start `daemon-doctor run`. Pairing waits for the phone's public key; Ctrl-C exits while leaving the code available to the run process until it expires.
 
 ### Android sideload
 
@@ -126,7 +133,7 @@ go build -o daemon-doctor ./cmd/daemon-doctor
 daemon-doctor demo
 daemon-doctor status --config config.example.yaml
 daemon-doctor run --config config.example.yaml
-daemon-doctor pair --config config.example.yaml
+daemon-doctor pair --out pairing.png --config config.example.yaml
 daemon-doctor fix --service example-desktop-app --action force-restart --dry-run --config config.example.yaml
 daemon-doctor fix --process ExampleTool --action stop --dry-run --config config.example.yaml
 daemon-doctor fix --approval approval.json --dry-run --config config.example.yaml
@@ -218,7 +225,7 @@ Those two lines are the benchmark tool's output for that run. Time from a failur
 - Consecutive-check state lives in the `run` process. `status` is one sample, so a single `status` call does not by itself raise a Down alert or a 5-minute resource alert.
 - After 3 failures in an hour the alert stops offering a fix. `daemon-doctor fix` still runs an allowlisted action when you ask it to.
 - A local `y` still approves a fix typed on this machine. A phone approval is a separate signed message.
-- The relay sees the one-time pairing code when the phone registers. A hostile relay can substitute a phone key on that first registration. After a key is stored, the Mac rejects forged, replayed, expired, altered, and unknown-key approvals without running a fix.
+- Pairing version 2 keeps the QR secret off the relay and refuses substituted keys, altered proofs, expired registrations, and the old secret-bearing registration format. Both Mac and Android need the new protocol. Old `phones.json` is preserved but its keys are no longer trusted for approvals. Pair again with a fresh version 2 QR; authenticated keys are saved in `phones-v2.json`. Old pending QR codes and version 1 QR payloads are refused.
 - Alert text is not encrypted. The mailbox can read the short alert it stores.
 - The phone keeps its paired Mac id in app-private preferences. The one-time pairing code is stored with that payload. The private key is not.
 - Camera scanning and Android Keystore signing were not run on a device. The unit tests use the software signer. `selectBackend` chooses the keystore path only when Ed25519 key generation succeeds; any failure uses the app-private seed.

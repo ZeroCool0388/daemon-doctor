@@ -116,9 +116,11 @@ type identityFile struct {
 }
 
 type pendingCode struct {
+	Version int       `json:"version"`
 	Code    string    `json:"code"`
 	Expires time.Time `json:"expires"`
 	Used    bool      `json:"used"`
+	Phone   string    `json:"phone,omitempty"`
 }
 
 type phoneFile struct {
@@ -187,7 +189,12 @@ func createIdentity(dir string) (*Store, error) {
 		nonces:  map[string]struct{}{},
 		alerts:  map[string]Raised{},
 	}
-	return st, st.load()
+	unlock, err := st.lockState()
+	if err != nil {
+		return nil, err
+	}
+	unlock()
+	return st, nil
 }
 
 func openIdentity(dir string, data []byte) (*Store, error) {
@@ -218,13 +225,19 @@ func openIdentity(dir string, data []byte) (*Store, error) {
 		nonces:  map[string]struct{}{},
 		alerts:  map[string]Raised{},
 	}
-	if err := st.load(); err != nil {
+	unlock, err := st.lockState()
+	if err != nil {
 		return nil, err
 	}
+	unlock()
 	return st, nil
 }
 
 func (s *Store) load() error {
+	s.phones = map[string]struct{}{}
+	s.nonces = map[string]struct{}{}
+	s.alerts = map[string]Raised{}
+	s.pending = nil
 	if err := s.loadPhones(); err != nil {
 		return err
 	}
@@ -251,8 +264,15 @@ func Fingerprint(key ed25519.PublicKey) string {
 
 // BeginPairing saves a one-time code and returns the text a phone scans.
 func (s *Store) BeginPairing(now time.Time, relayURL string) (payload string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockState()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	code := NewID()
-	pending := pendingCode{Code: code, Expires: now.Add(PairingTTL).UTC()}
+	pending := pendingCode{Version: 2, Code: code, Expires: now.Add(PairingTTL).UTC()}
 	body, err := json.Marshal(pending)
 	if err != nil {
 		return "", err
@@ -260,16 +280,14 @@ func (s *Store) BeginPairing(now time.Time, relayURL string) (payload string, er
 	if err := writeFile(filepath.Join(s.dir, "pending.json"), body); err != nil {
 		return "", err
 	}
-	s.mu.Lock()
 	s.pending = &pending
-	s.mu.Unlock()
 	return Payload(s.macID, s.public, code, relayURL), nil
 }
 
 // Payload is the QR text. It carries the Mac public key and a one-time code.
 func Payload(macID string, public ed25519.PublicKey, code, relayURL string) string {
 	return strings.Join([]string{
-		"daemon-doctor:1",
+		"daemon-doctor:2",
 		macID,
 		encodeKey(public),
 		code,
@@ -280,7 +298,7 @@ func Payload(macID string, public ed25519.PublicKey, code, relayURL string) stri
 // ParsePayload splits a pairing payload. The relay URL may contain colons.
 func ParsePayload(payload string) (macID, code, relayURL string, public ed25519.PublicKey, err error) {
 	parts := strings.Split(payload, ":")
-	if len(parts) < 5 || parts[0] != "daemon-doctor" || parts[1] != "1" {
+	if len(parts) < 6 || parts[0] != "daemon-doctor" || parts[1] != "2" {
 		return "", "", "", nil, fmt.Errorf("pairing payload")
 	}
 	macID = parts[2]
@@ -290,43 +308,6 @@ func ParsePayload(payload string) (macID, code, relayURL string, public ed25519.
 	}
 	relayURL = strings.Join(parts[5:], ":")
 	return macID, parts[4], relayURL, ed25519.PublicKey(key), nil
-}
-
-// AcceptPairing stores a phone public key when the one-time code matches.
-// The code works once. A repeat delivery for that same phone is ignored.
-// A different phone using the spent code is refused.
-func (s *Store) AcceptPairing(now time.Time, code string, phone ed25519.PublicKey) error {
-	if len(phone) != ed25519.PublicKeySize || !validID(code) {
-		return &Refusal{Reason: ReasonMalformed, Detail: "pairing message is not usable"}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.pending == nil || !now.Before(s.pending.Expires) {
-		return &Refusal{Reason: ReasonExpired, Detail: "pairing code is not active"}
-	}
-	if subtleMatch(s.pending.Code, code) != 1 {
-		return &Refusal{Reason: ReasonMac, Detail: "pairing code does not match"}
-	}
-	encoded := encodeKey(phone)
-	if s.pending.Used {
-		if _, ok := s.phones[encoded]; ok {
-			return nil
-		}
-		return &Refusal{Reason: ReasonExpired, Detail: "pairing code is not active"}
-	}
-	s.pending.Used = true
-	body, err := json.Marshal(s.pending)
-	if err != nil {
-		return err
-	}
-	if err := writeFile(filepath.Join(s.dir, "pending.json"), body); err != nil {
-		return err
-	}
-	if _, ok := s.phones[encoded]; ok {
-		return nil
-	}
-	s.phones[encoded] = struct{}{}
-	return s.savePhones()
 }
 
 // Phones returns the paired public keys.
@@ -350,6 +331,11 @@ func (s *Store) RecordAlert(alert Raised) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockState()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, ok := s.alerts[alert.ID]; ok {
 		return nil
 	}
@@ -374,14 +360,14 @@ func Sign(private ed25519.PrivateKey, approval Approval) (Approval, error) {
 // Consume checks an approval and records its nonce.
 // A second call with the same nonce is a replay.
 func (s *Store) Consume(now time.Time, approval Approval) (Raised, error) {
-	raised, err := s.check(now, approval, true)
+	raised, err := s.check(now, approval)
 	if err != nil {
 		return Raised{}, err
 	}
 	return raised, nil
 }
 
-func (s *Store) check(now time.Time, approval Approval, consume bool) (Raised, error) {
+func (s *Store) check(now time.Time, approval Approval) (Raised, error) {
 	if err := canonicalOK(approval); err != nil {
 		return Raised{}, err
 	}
@@ -396,6 +382,11 @@ func (s *Store) check(now time.Time, approval Approval, consume bool) (Raised, e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockState()
+	if err != nil {
+		return Raised{}, err
+	}
+	defer unlock()
 	if _, paired := s.phones[encodeKey(approval.PublicKey)]; !paired {
 		return Raised{}, &Refusal{Reason: ReasonUnknownKey, Detail: "phone key is not paired"}
 	}
@@ -412,12 +403,10 @@ func (s *Store) check(now time.Time, approval Approval, consume bool) (Raised, e
 	if _, used := s.nonces[approval.Nonce]; used {
 		return Raised{}, &Refusal{Reason: ReasonReplay, Detail: "approval was already used"}
 	}
-	if consume {
-		if err := appendLine(filepath.Join(s.dir, "nonces.jsonl"), []byte(approval.Nonce)); err != nil {
-			return Raised{}, err
-		}
-		s.nonces[approval.Nonce] = struct{}{}
+	if err := appendLine(filepath.Join(s.dir, "nonces.jsonl"), []byte(approval.Nonce)); err != nil {
+		return Raised{}, err
 	}
+	s.nonces[approval.Nonce] = struct{}{}
 	raised.Actions = []string{approval.FixID}
 	return raised, nil
 }
@@ -513,30 +502,10 @@ func UnmarshalApproval(data []byte) (Approval, error) {
 	}, nil
 }
 
-// UnmarshalPairing reads a phone registration. Unknown JSON fields are rejected.
-func UnmarshalPairing(data []byte) (code string, phone ed25519.PublicKey, err error) {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.DisallowUnknownFields()
-	var wire struct {
-		Code      string `json:"code"`
-		PublicKey string `json:"public_key"`
-	}
-	if err := dec.Decode(&wire); err != nil {
-		return "", nil, &Refusal{Reason: ReasonMalformed, Detail: "pairing message is not usable"}
-	}
-	var extra json.RawMessage
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return "", nil, &Refusal{Reason: ReasonMalformed, Detail: "pairing message is not usable"}
-	}
-	key, err := decodeKey(wire.PublicKey)
-	if err != nil || len(key) != ed25519.PublicKeySize || !validID(wire.Code) {
-		return "", nil, &Refusal{Reason: ReasonMalformed, Detail: "pairing message is not usable"}
-	}
-	return wire.Code, ed25519.PublicKey(key), nil
-}
-
 func (s *Store) loadPhones() error {
-	data, err := os.ReadFile(filepath.Join(s.dir, "phones.json"))
+	// Legacy registrations may have exposed the QR secret to the relay.
+	// Keep their file untouched, but trust only keys authenticated by v2.
+	data, err := os.ReadFile(filepath.Join(s.dir, "phones-v2.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -562,7 +531,7 @@ func (s *Store) savePhones() error {
 	if err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(s.dir, "phones.json"), body)
+	return writeFile(filepath.Join(s.dir, "phones-v2.json"), body)
 }
 
 func (s *Store) loadNonces() error {
@@ -641,6 +610,9 @@ func appendLine(path string, body []byte) error {
 		return err
 	}
 	_, err = f.Write(append(body, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
 	closeErr := f.Close()
 	if err != nil {
 		return err
@@ -666,18 +638,4 @@ func readLines(path string, fn func([]byte) error) error {
 		}
 	}
 	return nil
-}
-
-func subtleMatch(left, right string) int {
-	if len(left) != len(right) {
-		return 0
-	}
-	var diff byte
-	for i := 0; i < len(left); i++ {
-		diff |= left[i] ^ right[i]
-	}
-	if diff == 0 {
-		return 1
-	}
-	return 0
 }

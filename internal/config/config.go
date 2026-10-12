@@ -5,13 +5,13 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,11 +26,16 @@ type Config struct {
 }
 
 type file struct {
-	PluginsDir string `yaml:"plugins_dir" toml:"plugins_dir"`
-	LogPath    string `yaml:"log_path" toml:"log_path"`
-	Interval   string `yaml:"interval" toml:"interval"`
-	RelayURL   string `yaml:"relay_url" toml:"relay_url"`
-	StateDir   string `yaml:"state_dir" toml:"state_dir"`
+	PluginsDir string       `yaml:"plugins_dir" toml:"plugins_dir"`
+	LogPath    string       `yaml:"log_path" toml:"log_path"`
+	Interval   string       `yaml:"interval" toml:"interval"`
+	RelayURL   string       `yaml:"relay_url" toml:"relay_url"`
+	Relay      *relayConfig `yaml:"relay" toml:"relay"`
+	StateDir   string       `yaml:"state_dir" toml:"state_dir"`
+}
+
+type relayConfig struct {
+	URL string `yaml:"url" toml:"url"`
 }
 
 // Load reads a YAML or TOML config. Relative paths are resolved from the
@@ -87,6 +92,12 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	dir := filepath.Dir(base)
+	if raw.Relay != nil {
+		if raw.RelayURL != "" {
+			return Config{}, fmt.Errorf("use relay.url only; remove relay_url")
+		}
+		raw.RelayURL = raw.Relay.URL
+	}
 	relayURL, err := cleanRelayURL(raw.RelayURL)
 	if err != nil {
 		return Config{}, err
@@ -109,14 +120,11 @@ func cleanRelayURL(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return "", fmt.Errorf("relay_url must be an http or https URL")
+	client, err := relay.New(raw)
+	if err != nil {
+		return "", fmt.Errorf("relay.url: %w", err)
 	}
-	if u.User != nil {
-		return "", fmt.Errorf("relay_url must not include a user or password")
-	}
-	return u.String(), nil
+	return client.BaseURL, nil
 }
 
 func resolve(baseDir, path string) string {
