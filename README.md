@@ -132,9 +132,45 @@ daemon-doctor fix --approval approval.json --dry-run --config config.example.yam
 
 ## Test results
 
-Local `go test -count=1 ./...` on Go 1.25.14 passed every package that has tests, including `internal/demo`. A following `go test -count=1 -json ./...` emitted 111 pass events that include a test name. 26 of those names are subtests. The GitHub Actions log for this branch is the count recorded below once that run is in.
+Counts below are copied from GitHub Actions run [38186522355](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38186522355) (push of `b3902cf` on `cursor/phase-5-demo-readme-f670`, 2026-10-12, conclusion success). The pull request run [38186524731](https://github.com/ZeroCool0388/daemon-doctor/actions/runs/38186524731) on the same commit also succeeded. Go on that runner was 1.25.14, image ubuntu-24.04.
 
-_CI counts are filled from the Actions log for this branch._
+The `go test summary` step printed these lines from `go test -count=1 -json ./...`:
+
+```
+ok	github.com/ZeroCool0388/daemon-doctor/internal/checks	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/config	0.004s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/demo	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/cli	0.241s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/fixes	0.014s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/logbook	0.003s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/plugins	0.006s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/doctor	0.144s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/rules	0.005s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/relay	0.007s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/security	0.008s
+ok	github.com/ZeroCool0388/daemon-doctor/internal/sysprobe	0.04s
+pass events with a test name: 111
+subtests: 26
+```
+
+The elapsed figures are the package times from that JSON run. The step exits on a fail event; this log has none.
+
+Relay `npm test` printed this Vitest summary. The duration is the runner total.
+
+```
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  00:03:03
+   Duration  1.35s (transform 41ms, setup 0ms, import 69ms, tests 65ms, environment 0ms)
+```
+
+The Android job printed:
+
+```
+android unit tests: 10 failures=0 errors=0 skipped=0
+```
+
+Gradle printed `BUILD SUCCESSFUL in 2m 9s`. The job uploaded the `debug-apk` artifact (id 11719792059, zip size 24572514 bytes).
 
 ## Cost
 
