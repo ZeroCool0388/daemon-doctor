@@ -129,7 +129,7 @@ func TestNtfyMemoryHogAlertsOnceAndRecovers(t *testing.T) {
 	snap.Host.MemoryPressure = "normal"
 	src.Set(snap)
 	cycle()
-	if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != "Memory pressure is back to normal." {
+	if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != "Memory pressure is back below the alert level." {
 		t.Fatalf("expected one memory all-clear, got %+v", events)
 	}
 	cycle()
@@ -198,18 +198,27 @@ func TestNtfyMemoryHogQueuesDespiteLogFailure(t *testing.T) {
 
 func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 	for _, tc := range []struct {
-		name, kind string
-		watched    bool
+		name, kind, want string
+		watched          bool
+		criticalMemory   bool
 	}{
-		{"watched CPU without fixes", rules.KindCPUHog, true},
-		{"unwatched CPU", rules.KindCPUHog, false},
-		{"unwatched memory", rules.KindMemoryHog, false},
-		{"low disk", rules.KindDiskLow, false},
+		{"watched CPU without fixes", rules.KindCPUHog, "CPU usage is back below the alert threshold.", true, false},
+		{"unwatched CPU", rules.KindCPUHog, "CPU usage is back below the alert threshold.", false, false},
+		{"unwatched memory", rules.KindMemoryHog, "Memory pressure is back below the alert level.", false, false},
+		{"critical memory recovers to warning", rules.KindMemoryHog, "Memory pressure is back below the alert level.", false, true},
+		{"low disk", rules.KindDiskLow, "Free disk space is back above the alert threshold.", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.criticalMemory {
+				for i := range host.Checks {
+					if host.Checks[i].Type == plugins.CheckMemory {
+						host.Checks[i].Level = "critical"
+					}
+				}
 			}
 			service := loadExample(t)
 			service.Fixes = nil
@@ -283,10 +292,13 @@ func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 				snap = known
 				snap.Processes[index].CPUPercent = 0
 				snap.Host.MemoryPressure = "normal"
+				if tc.criticalMemory {
+					snap.Host.MemoryPressure = "warn"
+				}
 				snap.Host.DiskFreePercent = 40
 				snap.Host.NetworkUp = true
 				cycle()
-				if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || !strings.Contains(events[0].Message, "back to normal") {
+				if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != tc.want {
 					t.Fatalf("expected one machine all-clear, got %+v", events)
 				}
 				cycle()
@@ -410,11 +422,11 @@ func TestNtfySimultaneousMachineConditionsClearSeparately(t *testing.T) {
 		t.Fatalf("expected independent CPU and memory alerts, got %+v", events)
 	}
 	d.queueMachineNotifications(rules.MachineVerdict{Normal: []string{rules.KindCPUHog}})
-	if events := sent(); len(events) != 1 || events[0].Message != "CPU usage is back to normal." {
+	if events := sent(); len(events) != 1 || events[0].Message != "CPU usage is back below the alert threshold." {
 		t.Fatalf("expected only CPU recovery, got %+v", events)
 	}
 	d.queueMachineNotifications(rules.MachineVerdict{Normal: []string{rules.KindCPUHog, rules.KindMemoryHog}})
-	if events := sent(); len(events) != 1 || events[0].Message != "Memory pressure is back to normal." {
+	if events := sent(); len(events) != 1 || events[0].Message != "Memory pressure is back below the alert level." {
 		t.Fatalf("expected only memory recovery, got %+v", events)
 	}
 	d.UseNotifier(nil)

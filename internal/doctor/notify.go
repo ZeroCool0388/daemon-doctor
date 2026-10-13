@@ -44,7 +44,8 @@ func (d *Doctor) queueNotification(row ServiceStatus) {
 }
 
 // Machine incidents are independent of service health and fix eligibility.
-// Track the condition until a normal reading, even if its top process changes.
+// Track the condition until a reading clears the alert threshold, even if its
+// top process changes.
 func (d *Doctor) queueMachineNotifications(verdict rules.MachineVerdict) {
 	if d.notifier == nil {
 		return
@@ -58,11 +59,11 @@ func (d *Doctor) queueMachineNotifications(verdict rules.MachineVerdict) {
 		if message == "" {
 			switch kind {
 			case rules.KindMemoryHog:
-				message = "Memory pressure is back to normal."
+				message = "Memory pressure is back below the alert level."
 			case rules.KindCPUHog:
-				message = "CPU usage is back to normal."
+				message = "CPU usage is back below the alert threshold."
 			case rules.KindDiskLow:
-				message = "Free disk space is back to normal."
+				message = "Free disk space is back above the alert threshold."
 			}
 		}
 		d.enqueueNotification(notify.Event{ServiceName: alert.ServiceName, State: rules.StatusOK, Message: message})

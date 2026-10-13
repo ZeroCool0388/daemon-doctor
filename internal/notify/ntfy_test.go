@@ -132,7 +132,9 @@ func TestNtfyMachineMessagesAndPrivacy(t *testing.T) {
 		state, raw, want string
 	}{
 		{"alert", "OpenClaw gateway is the largest memory user, and memory pressure has stayed at warning for 6 minutes.", "OpenClaw gateway is the largest memory user, and memory pressure has stayed at warning for 6 minutes."},
-		{"ok", "Memory pressure is back to normal.", "Memory pressure is back to normal."},
+		{"ok", "Memory pressure is back below the alert level.", "Memory pressure is back below the alert level."},
+		{"ok", "CPU usage is back below the alert threshold.", "CPU usage is back below the alert threshold."},
+		{"ok", "Free disk space is back above the alert threshold.", "Free disk space is back above the alert threshold."},
 		{"alert", "Private " + topic + "\n\x00alert.", "Private [private]  alert."},
 		{"ok", "token=abcdefgh12345678 is back to normal.", "token=[blanked] is back to normal."},
 		{"alert", strings.Repeat("é", 1100), strings.Repeat("é", 1024)},
