@@ -133,7 +133,8 @@ export class RemoteMCP {
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
       rpc = value as RPC;
       if (rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string" ||
-          (rpc.id !== undefined && typeof rpc.id !== "string" && typeof rpc.id !== "number" && rpc.id !== null)) throw new Error();
+          (rpc.id !== undefined && typeof rpc.id !== "string" && typeof rpc.id !== "number" && rpc.id !== null) ||
+          (typeof rpc.id === "number" && !Number.isSafeInteger(rpc.id))) throw new Error();
     } catch {
       return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request" } }, { status: 400, headers });
     }
