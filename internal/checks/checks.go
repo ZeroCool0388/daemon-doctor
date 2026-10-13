@@ -54,6 +54,7 @@ func NewRegistry() *Registry {
 	r := &Registry{byType: map[string]Type{}}
 	r.mustRegister(processCheck{})
 	r.mustRegister(&launchdCheck{})
+	r.mustRegister(launchdServiceCheck{})
 	r.mustRegister(sleepCheck{})
 	r.mustRegister(networkCheck{})
 	r.mustRegister(diskCheck{})

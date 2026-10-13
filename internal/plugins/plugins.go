@@ -24,6 +24,7 @@ import (
 const (
 	CheckProcessRunning    = "process_running"
 	CheckLaunchdJob        = "launchd_job"
+	CheckLaunchdService    = "launchd_service"
 	CheckOutboundTCP       = "outbound_tcp"
 	CheckSleep             = "sleep_state"
 	CheckNetwork           = "network"
@@ -60,6 +61,7 @@ func BuiltinCosts() map[string]int {
 	return map[string]int{
 		CheckProcessRunning:    10,
 		CheckLaunchdJob:        11,
+		CheckLaunchdService:    11,
 		CheckSleep:             12,
 		CheckNetwork:           13,
 		CheckDisk:              14,
@@ -248,7 +250,8 @@ func decodeTOML(data []byte, dest *Plugin) error {
 
 // Validate checks p and rewrites launcher paths to cleaned absolute paths.
 // costs maps a check type to its cost. Checks must be non-decreasing in cost.
-// A service plug-in requires process_running first. A host plug-in uses host checks only.
+// A service plug-in starts with a process, launchd, or file check.
+// A host plug-in uses host checks only.
 func Validate(p *Plugin, costs map[string]int) error {
 	if p == nil {
 		return fmt.Errorf("plug-in is nil")
@@ -305,17 +308,18 @@ func Validate(p *Plugin, costs map[string]int) error {
 	}
 	if !p.Host {
 		_, sawJob := seenType[CheckLaunchdJob]
+		_, sawService := seenType[CheckLaunchdService]
 		_, sawFile := seenType[CheckFileRecent]
-		if !processConfigured(p.Process) && !sawJob && !sawFile {
+		if !processConfigured(p.Process) && !sawJob && !sawService && !sawFile {
 			return fmt.Errorf("process match is required")
 		}
 		switch {
 		case sawProcess && p.Checks[0].Type != CheckProcessRunning:
 			return fmt.Errorf("process_running must be the first check")
-		case !sawProcess && !sawJob && !sawFile:
-			return fmt.Errorf("process_running, launchd_job, or file_recent is required")
-		case !sawProcess && p.Checks[0].Type != CheckLaunchdJob && p.Checks[0].Type != CheckFileRecent:
-			return fmt.Errorf("launchd_job or file_recent must be the first check")
+		case !sawProcess && !sawJob && !sawService && !sawFile:
+			return fmt.Errorf("process_running, launchd_job, launchd_service, or file_recent is required")
+		case !sawProcess && p.Checks[0].Type != CheckLaunchdJob && p.Checks[0].Type != CheckLaunchdService && p.Checks[0].Type != CheckFileRecent:
+			return fmt.Errorf("launchd_job, launchd_service, or file_recent must be the first check")
 		}
 		if _, sawFlags := seenType[CheckLaunchedWithFlags]; sawFlags && !sawProcess {
 			return fmt.Errorf("launched_with_flags needs process_running")
@@ -406,6 +410,18 @@ func validateCheck(check *Check) error {
 		}
 		if err := unexpected(check, "cpu_percent", "duration"); err != nil {
 			return fmt.Errorf("cpu only takes cpu_percent and duration")
+		}
+	case CheckLaunchdService:
+		label, err := cleanLabel(check.Label)
+		if err != nil {
+			return err
+		}
+		check.Label = label
+		if check.Port < 1 || check.Port > 65535 {
+			return fmt.Errorf("launchd_service port must be from 1 to 65535")
+		}
+		if err := unexpected(check, "label", "port"); err != nil {
+			return fmt.Errorf("launchd_service only takes label and port")
 		}
 	case CheckLaunchdJob:
 		label, err := cleanLabel(check.Label)

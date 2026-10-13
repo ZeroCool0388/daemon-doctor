@@ -224,6 +224,9 @@ func (s *liveSource) fillHints(ctx context.Context, snap *Snapshot) {
 	if runtime.GOOS == "darwin" && len(hints.Labels) > 0 {
 		snap.Launchd = readLaunchdJobs(ctx, hints.Labels)
 	}
+	if runtime.GOOS == "darwin" && len(hints.Services) > 0 {
+		snap.Services = readSystemServices(ctx, hints.Services)
+	}
 }
 
 func statFiles(paths []string) map[string]FileStamp {

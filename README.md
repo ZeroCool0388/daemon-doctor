@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml)
 
-**A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and runs a locally allowlisted fix after a signed phone approval or local confirmation. Local MCP tools let an LLM client inspect health and request a configured fix.
+**A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and sends phone alerts through ntfy. Approve a configured fix in an MCP client's chat, at the local terminal, or through the optional Android app's signed approval flow.
 
 Fixed rules, one Go binary, one plug-in file per service. The Mac runs as the normal user and connects outward to ntfy for phone alerts
 and to an optional relay mailbox; it opens no inbound ports.
@@ -37,7 +37,7 @@ The replay also covers network recovery, an unwatched CPU hog and repeated failu
 
 ## Phone alerts
 
-**ntfy is the recommended phone alert.** Enable it with
+**ntfy is the recommended phone alert path.** Enable it with
 `daemon-doctor ntfy-setup`, then subscribe to the printed link in the
 [ntfy phone app](https://docs.ntfy.sh/subscribe/phone/) or browser. It sends a
 short notice when a watched service becomes Down or Stuck and one when it
@@ -45,6 +45,7 @@ recovers. An unchanged condition produces no repeated notices.
 
 ntfy runs independently of the relay and phone pairing. The Daemon Doctor
 Android app remains an optional extra for service views and signed fix approvals.
+It is not required for ntfy alerts or MCP access.
 
 ## Use with Cursor, Codex or Claude
 
@@ -62,6 +63,11 @@ both daemon and MCP opt-in, plus a client configured to confirm each call.
 A cloud MCP client can connect through the same Cloudflare relay. The Mac
 keeps an authenticated outbound WebSocket; it needs no inbound port or phone
 pairing. Remote calls use the same six MCP tools and fix handlers as stdio.
+Add the remote URL and bearer token below to a client that supports Streamable
+HTTP MCP and bearer authentication. From the chat, inspect service health and
+offered fixes, approve an exact offer, then let the client call `run_fix` and
+show the recheck result. Configure the client to require confirmation for every
+`run_fix` call; a message in the chat does not enforce that setting.
 
 If a fix disrupts the link, the relay reports a pending result instead of
 reporting the Mac unreachable for that request. After reconnecting, use
@@ -191,6 +197,15 @@ Replace the example paths with the executable and arguments for your service. `r
 
 The supplied plug-ins are starting points: configure launchers before relying on their restart actions. Process selection also supports command-line substrings and regular expressions; checks include outbound TCP connections, required flags, recent files and launchd job results.
 
+The Screen Sharing plug-in uses `launchd_service` with the system label
+`com.apple.screensharing` and TCP port 5900. It reports `ok` when the launchd
+service is loaded or the port is listening, including when no viewer is
+connected and `screensharingd` is absent. When both probes confirm the service
+is unloaded and the port is not listening for two consecutive checks, it raises
+a disabled-or-unreachable alert. Unreadable probes remain at `watch`. Enable Screen
+Sharing in System Settings > General > Sharing; the supplied process fixes do
+not enable a disabled service.
+
 For a macOS app that is running without required launch flags, configure `relaunch` in its local plug-in:
 
 ```yaml
@@ -218,7 +233,7 @@ When the flags check fails, `relaunch` is offered ahead of `restart`. It asks th
 
 | Condition | Behaviour |
 |---|---|
-| Down | Two consecutive missing-process checks; offers an approved restart or launchd kickstart. |
+| Down | Two consecutive missing-process or unavailable-service checks; offers an approved restart or launchd kickstart. |
 | Running but stuck | A failing health signal; offers an approved force restart. |
 | Missing flags | Offers the configured relaunch, or restart. |
 | Failed scheduled job | Offers the configured kickstart, or restart. |
@@ -248,7 +263,11 @@ Version 1 pairing payloads and registrations are refused. Old `phones.json` is p
 
 ## Quick start
 
-Build the Mac program with Go 1.25 or later. Relay deployment uses Node 22 and a Cloudflare account. Android builds use Java 17 and the Android SDK; a prebuilt debug APK is also available through the workflow described below.
+Build the Mac program with Go 1.25 or later. Start with the Mac and ntfy steps,
+then run the daemon or set it up at login. The relay and Android steps are
+optional. Relay deployment uses Node 22 and a Cloudflare account. Android
+builds use Java 17 and the Android SDK; a prebuilt debug APK is also available
+through the workflow described below.
 
 ### 1. Set up the Mac
 
@@ -268,13 +287,22 @@ Copy only plug-ins for services you run, and configure their fixes. `plugins_dir
 Keep the config outside a Git checkout, then run:
 
 ```sh
-~/bin/daemon-doctor ntfy-setup
+~/bin/daemon-doctor ntfy-setup --config ~/.config/daemon-doctor/config.yaml
 ```
 
 Use `--config path` for a different local YAML or TOML config. The command
 creates a 256-bit random topic, enables notifications, saves the config with
-mode 0600 and prints the subscribe link. Subscribe to that link in ntfy, then
-run the daemon. Setup itself sends no notification.
+mode 0600 and prints the subscribe link. Open the ntfy phone app, add a
+subscription using the server and topic from that link (or open the link
+in a browser), then start monitoring:
+
+```sh
+~/bin/daemon-doctor run --config ~/.config/daemon-doctor/config.yaml
+```
+
+Setup itself sends no notification. Alerts arrive when a watched service
+becomes Down or Stuck, followed by a notice when it recovers. No relay
+deployment or Android app pairing is needed for these notices.
 
 The local config block is `notify.ntfy`, with `server`, `topic` and `enabled`.
 `server` defaults to `https://ntfy.sh`; `enabled` defaults to false. The example
