@@ -61,7 +61,7 @@ func New(backend control.Backend, allowFixes bool) *mcp.Server {
 	})
 	mcp.AddTool(s, tool("run_fix", "After explicit human approval for this exact offer, consume it once, apply its allowlisted fix and recheck. May stop or restart processes. Host approval must be configured; annotations are advisory.", false), func(ctx context.Context, _ *mcp.CallToolRequest, in fixInput) (*mcp.CallToolResult, map[string]any, error) {
 		if !allowFixes {
-			return nil, nil, fmt.Errorf("MCP fixes are disabled; start this MCP client with --allow-fixes only after configuring per-call host approval")
+			return nil, nil, fmt.Errorf("MCP fixes are disabled; enable fixes only after configuring per-call host approval")
 		}
 		return call(ctx, control.Request{Method: "run_fix", OfferID: in.OfferID, Service: in.Service})
 	})

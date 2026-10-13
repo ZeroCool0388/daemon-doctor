@@ -142,6 +142,12 @@ func LoadOrCreate(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("state directory: %w", err)
 	}
+	// Serialize first identity creation when run and mcp-token start together.
+	unlock, err := lockIdentity(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	path := filepath.Join(dir, "identity.json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

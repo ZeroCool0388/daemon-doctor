@@ -132,3 +132,35 @@ func TestControlDefaultsAndOptIn(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteMCPConfig(t *testing.T) {
+	for _, tc := range []struct {
+		ext, body    string
+		enabled, bad bool
+	}{
+		{"yaml", "relay:\n  url: https://relay.example.invalid\n  mcp_link: true\n", true, false},
+		{"yaml", "relay:\n  url: https://relay.example.invalid\n", false, false},
+		{"yaml", "relay:\n  mcp_link: true\n", false, true},
+		{"toml", "[relay]\nurl = 'https://relay.example.invalid'\nmcp_link = true\n", true, false},
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config."+tc.ext)
+		prefix := "plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\n"
+		if tc.ext == "toml" {
+			prefix = "plugins_dir = 'plugins'\nlog_path = 'events.jsonl'\ninterval = '30s'\n"
+		}
+		if err := os.WriteFile(path, []byte(prefix+tc.body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if tc.bad {
+			if err == nil {
+				t.Fatal("accepted missing URL")
+			}
+			continue
+		}
+		if err != nil || cfg.RelayMCPLink != tc.enabled {
+			t.Fatal("MCP config", cfg, err)
+		}
+	}
+}

@@ -21,6 +21,7 @@ type Config struct {
 	PluginsDir        string
 	LogPath           string
 	Interval          time.Duration
+	RelayMCPLink      bool
 	RelayURL          string
 	StateDir          string
 	ControlEnabled    bool
@@ -44,7 +45,8 @@ type file struct {
 }
 
 type relayConfig struct {
-	URL string `yaml:"url" toml:"url"`
+	URL     string `yaml:"url" toml:"url"`
+	MCPLink bool   `yaml:"mcp_link" toml:"mcp_link"`
 }
 
 // Load reads a YAML or TOML config. Relative paths are resolved from the
@@ -111,6 +113,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpLink := raw.Relay != nil && raw.Relay.MCPLink
+	if mcpLink && relayURL == "" {
+		return Config{}, fmt.Errorf("relay.mcp_link requires relay.url")
+	}
 	stateDir := dir
 	if strings.TrimSpace(raw.StateDir) != "" {
 		stateDir = resolve(dir, raw.StateDir)
@@ -124,11 +130,12 @@ func Load(path string) (Config, error) {
 	}
 	return Config{
 		ControlEnabled: enabled, ControlAllowFixes: allowFixes, ControlSocket: filepath.Join(stateDir, "control", "control.sock"),
-		PluginsDir: resolve(dir, raw.PluginsDir),
-		LogPath:    resolve(dir, raw.LogPath),
-		Interval:   interval,
-		RelayURL:   relayURL,
-		StateDir:   stateDir,
+		PluginsDir:   resolve(dir, raw.PluginsDir),
+		LogPath:      resolve(dir, raw.LogPath),
+		Interval:     interval,
+		RelayURL:     relayURL,
+		RelayMCPLink: mcpLink,
+		StateDir:     stateDir,
 	}, nil
 }
 

@@ -25,7 +25,7 @@ export default {
       return new Response("bad mac id", { status: 400 });
     }
     const box = parts[3];
-    if (box !== "ws" && box !== "pairing" && box !== "alerts" && box !== "approvals" && box !== "results") {
+    if (box !== "mcp" && box !== "mcp-link" && box !== "mcp-token" && box !== "ws" && box !== "pairing" && box !== "alerts" && box !== "approvals" && box !== "results") {
       return new Response("not found", { status: 404 });
     }
     const id = env.MAILBOX.idFromName(parts[2]);
