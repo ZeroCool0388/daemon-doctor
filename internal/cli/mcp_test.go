@@ -85,6 +85,8 @@ fixes:
 	defer cancel()
 	monitor := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLiveMCPSocketRoundTrip$")
 	monitor.Env = append(os.Environ(), "DD_MONITOR_TEST_CONFIG="+cfg)
+	var monitorStderr bytes.Buffer
+	monitor.Stderr = &monitorStderr
 	if err = monitor.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +94,9 @@ fixes:
 		_ = monitor.Process.Signal(os.Interrupt)
 		if err := monitor.Wait(); err != nil && ctx.Err() == nil {
 			t.Error(err)
+		}
+		if t.Failed() && monitorStderr.Len() > 0 {
+			t.Logf("monitor stderr: %s", monitorStderr.String())
 		}
 		if _, err := os.Lstat(filepath.Join(dir, "state", "control", "control.sock")); !os.IsNotExist(err) {
 			t.Error("monitor did not clean up socket")

@@ -45,6 +45,73 @@ See [setup examples and approval requirements](docs/mcp.md) for each client.
 MCP destructive annotations cannot enforce human approval: live fixes need
 both daemon and MCP opt-in, plus a client configured to confirm each call.
 
+## Remote MCP
+
+A cloud MCP client can connect through the same Cloudflare relay. The Mac
+keeps an authenticated outbound WebSocket; it needs no inbound port or phone
+pairing. Remote calls use the same five MCP tools and fix handlers as stdio.
+
+Enable the link in the Mac config, then run the daemon:
+
+```yaml
+relay:
+  url: https://your-relay.example.workers.dev
+  mcp_link: true
+control:
+  allow_fixes: false
+```
+
+```sh
+daemon-doctor mcp-token --config ~/.config/daemon-doctor/config.yaml
+daemon-doctor run --config ~/.config/daemon-doctor/config.yaml
+```
+
+`mcp-token` creates the Mac identity if needed, registers a new token's SHA-256
+hash with the relay and prints the token once. It does not save the token.
+The command writes the Streamable HTTP URL to stderr. Use that URL and the
+printed token in the client:
+
+```text
+https://your-relay.example.workers.dev/v1/macs/<mac_id>/mcp
+Authorization: Bearer <token>
+```
+
+The endpoint accepts JSON-RPC over POST and returns JSON. It supports
+`initialize`, `notifications/initialized`, `ping`, `tools/list` and
+`tools/call`; GET returns 405. A supplied `Mcp-Session-Id` is echoed, but
+requests are sessionless. The client's MCP protocol version and standard MCP
+headers are forwarded to the Mac. Requests and link responses are bounded
+to 64 KiB.
+The daemon sends a heartbeat every 30 seconds and reconnects with backoff.
+Calls wait up to 15 seconds; an offline or unresponsive Mac returns
+`Mac unreachable, last seen <ISO time>` (or `never` before the first link).
+For `tools/call`, this is a tool result with `isError: true`.
+
+**The token is a full-access credential to read status and request allowlisted
+fixes.** Keep it private and use HTTPS. Rotate it by running `mcp-token`
+again; the previous token stops authorising new requests. Remote live fixes
+require `control.allow_fixes: true` and a client that asks for explicit human
+approval for each exact offer. Tool annotations do not enforce that approval.
+Single-use offers, the allowlist, fresh checks and repeated-failure lockout
+remain enforced by the Mac. Backend calls use the link request deadline,
+including time spent waiting for daemon state locks. Cancellation stops further fix steps; signals already sent
+cannot be undone. Inspect status and recent events after a timeout.
+
+The Mac stores its separate link secret in `mcp-link.secret` with mode 0600;
+the relay stores credential hashes and the Mac public key. Link registration
+requires an Ed25519 signature from the Mac's existing identity key, binding the
+remote endpoint id and link-secret hash. The remote id derives from that public
+key; the phone-pairing id stays unchanged. Subsequent registrations also require
+the existing link secret. Hash-only registrations from older versions are
+refused; run `mcp-token` again and update the client's URL and token.
+The relay authenticates access but can read requests and results; it remains
+a trusted component for remote MCP and can forward fix requests. Phone pairing
+secrets and signed phone approvals remain separate.
+
+`relay.mcp_link` defaults to false. The link uses the existing SQLite-backed
+Durable Object with WebSocket hibernation and no additional hosted service.
+Worker and Durable Object free-tier quotas still apply.
+
 ## Architecture
 
 ```mermaid

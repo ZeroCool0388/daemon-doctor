@@ -49,6 +49,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fixCmd(args[2:], stdin, stdout, stderr)
 	case "pair":
 		return pairCmd(args[2:], stdout, stderr)
+	case "mcp-token":
+		return mcpTokenCmd(args[2:], stdout, stderr)
 	case "mcp":
 		return mcpCmd(args[2:], stdin, stdout, stderr)
 	case "demo":
@@ -71,6 +73,7 @@ Usage:
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
   daemon-doctor demo
+  daemon-doctor mcp-token [--config path]
   daemon-doctor mcp [--config path] [--demo] [--allow-fixes]
 
 status prints one check of each plug-in.
@@ -134,13 +137,15 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	defer book.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if cfg.ControlEnabled {
+	if cfg.ControlEnabled || cfg.RelayMCPLink {
 		store, e := offers.Open(filepath.Dir(cfg.ControlSocket))
 		if e != nil {
 			fmt.Fprintf(stderr, "control error: %v\n", e)
 			return 1
 		}
 		d.UseOffers(store)
+	}
+	if cfg.ControlEnabled {
 		server, e := control.Listen(cfg.ControlSocket, &control.Local{Doctor: d, AllowFixes: cfg.ControlAllowFixes})
 		if e != nil {
 			fmt.Fprintf(stderr, "control error: %v\n", e)
@@ -150,6 +155,28 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		done := make(chan error, 1)
 		go func() { done <- server.Serve(ctx) }()
 		defer func() { stop(); server.Close(); <-done }()
+	}
+	if cfg.RelayMCPLink {
+		sec, e := security.LoadOrCreate(cfg.StateDir)
+		if e != nil {
+			fmt.Fprintf(stderr, "MCP link error: %v\n", e)
+			return 1
+		}
+		secret, e := sec.MCPLinkSecret()
+		if e != nil {
+			fmt.Fprintf(stderr, "MCP link error: %v\n", e)
+			return 1
+		}
+		client, e := relay.New(cfg.RelayURL)
+		if e != nil {
+			fmt.Fprintf(stderr, "MCP link error: %v\n", e)
+			return 1
+		}
+		link := &relay.MCPLink{Client: client, MacID: sec.MCPMacID(), Secret: secret, Registration: sec.MCPRegistration(secret),
+			Dispatch: mcpserver.RemoteDispatch(&control.Local{Doctor: d, AllowFixes: cfg.ControlAllowFixes}, cfg.ControlAllowFixes)}
+		done := make(chan struct{})
+		go func() { defer close(done); link.Run(ctx, func(err error) { fmt.Fprintf(stderr, "%v\n", err) }) }()
+		defer func() { stop(); <-done }()
 	}
 	err = d.Run(ctx, cfg.Interval, func(rows []doctor.ServiceStatus) {
 		for _, row := range rows {
@@ -569,9 +596,15 @@ func attachRelay(d *doctor.Doctor, cfg config.Config) error {
 		d.UseRelay(sec, nil)
 		return nil
 	}
-	sec, err := security.Open(cfg.StateDir)
+	var sec *security.Store
+	var err error
+	if cfg.RelayMCPLink {
+		sec, err = security.LoadOrCreate(cfg.StateDir)
+	} else {
+		sec, err = security.Open(cfg.StateDir)
+	}
 	if err != nil {
-		return fmt.Errorf("pair first")
+		return fmt.Errorf("Mac identity: %w", err)
 	}
 	client, err := relay.New(cfg.RelayURL)
 	if err != nil {

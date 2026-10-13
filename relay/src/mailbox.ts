@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import type { Env } from "./index";
+import { RemoteMCP } from "./mcp";
 import { NoopPush } from "./push";
 
 const MAX_BODY = 4096;
@@ -7,7 +9,7 @@ const BOXES = new Set(["pairing", "alerts", "approvals", "results"]);
 
 type Stored = Record<string, unknown>;
 
-interface EventRow {
+interface EventRow extends Record<string, SqlStorageValue> {
   id: number;
   kind: string;
   body: string;
@@ -16,10 +18,12 @@ interface EventRow {
 // Mailbox is one Mac's queue. It stores JSON and forwards it.
 // It does not check signatures and it does not run commands.
 export class Mailbox extends DurableObject {
+  private readonly mcp: RemoteMCP;
   private readonly sockets = new Set<WebSocket>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.mcp = new RemoteMCP(ctx);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,6 +38,9 @@ export class Mailbox extends DurableObject {
     const parts = url.pathname.split("/").filter(Boolean);
     const macID = parts[2] ?? "";
     const box = parts[3] ?? "";
+    if (box === "mcp" || box === "mcp-link" || box === "mcp-token") {
+      return this.mcp.fetch(box, request);
+    }
     if (box === "ws") {
       return this.socket(request);
     }
@@ -47,6 +54,19 @@ export class Mailbox extends DurableObject {
       return this.store(macID, box, request);
     }
     return text("method not allowed", 405);
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    await this.mcp.message(ws, message);
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    ws.close([1005, 1006, 1015].includes(code) ? 1000 : code, reason);
+    await this.mcp.closed(ws);
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    await this.mcp.closed(ws);
   }
 
   private async store(macID: string, kind: string, request: Request): Promise<Response> {

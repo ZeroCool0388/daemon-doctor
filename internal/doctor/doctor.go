@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
@@ -39,7 +38,7 @@ type Doctor struct {
 	Fixes   *fixes.Runner
 	Log     *logbook.Book
 
-	mu          sync.Mutex
+	mu          stateMutex
 	offers      *offers.Store
 	active      map[string]rules.Alert
 	latest      []ServiceStatus
@@ -112,12 +111,17 @@ func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client) {
 // While the network is down or the Mac is asleep, service checks are skipped
 // so their streaks stay where they were, and no service alert is raised.
 func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
-	d.mu.Lock()
+	if err := d.mu.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer d.mu.Unlock()
 	return d.cycle(ctx)
 }
 
 func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if hinted, ok := d.Source.(sysprobe.Hinted); ok {
 		hinted.SetHints(hintsFor(d.Plugins))
 	}
@@ -567,13 +571,13 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 	actions := offeredActions(a)
 	if len(actions) > 0 && d.offers != nil {
-		if err := d.offers.Mint(d.now(), security.Raised{ID: a.ID, ServiceID: a.ServiceID, ServiceName: a.ServiceName, Kind: a.Kind, Actions: actions, Process: a.Process, At: a.At}, a.Message); err != nil {
+		if err := d.offers.MintContext(ctx, d.now(), security.Raised{ID: a.ID, ServiceID: a.ServiceID, ServiceName: a.ServiceName, Kind: a.Kind, Actions: actions, Process: a.Process, At: a.At}, a.Message); err != nil {
 			return err
 		}
 	}
 	d.active[a.ID] = a
 	if d.sec != nil {
-		if err := d.sec.RecordAlert(security.Raised{
+		if err := d.sec.RecordAlertContext(ctx, security.Raised{
 			ID:          a.ID,
 			ServiceID:   a.ServiceID,
 			ServiceName: a.ServiceName,

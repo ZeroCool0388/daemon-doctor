@@ -2,6 +2,7 @@ package fixes
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -351,5 +352,28 @@ func waitMarker(t *testing.T, path, want string) {
 			t.Fatal("launcher did not run")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type cancelAfterSignal struct {
+	fakeCtrl
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterSignal) Signal(pid int, sig syscall.Signal) error {
+	err := c.fakeCtrl.Signal(pid, sig)
+	c.cancel()
+	return err
+}
+
+func TestFixStopsSignallingAndDoesNotLaunchAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl := &cancelAfterSignal{cancel: cancel}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{tree(), tree()}}
+	runner := &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
+	_, err := runner.Apply(ctx, plugin("/example/launcher"), plugins.FixForceRestart, false)
+	if !errors.Is(err, context.Canceled) || len(ctrl.pids) != 1 || len(ctrl.launches) != 0 {
+		t.Fatalf("continued after cancellation: %+v %v", ctrl, err)
 	}
 }
