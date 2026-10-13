@@ -171,15 +171,10 @@ func commandOutput(ctx context.Context, timeout time.Duration, name string, args
 }
 
 func takeDarwin(ctx context.Context) (Snapshot, error) {
-	psOut, err := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "%cpu=", "-o", "rss=", "-o", "command=").Output()
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("ps: %w", err)
-	}
-	procs, err := ParsePSResource(string(psOut))
+	procs, err := sampleProcessLifetimes(ctx, darwinStartTimes, readDarwinProcesses)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	procs = attachExePaths(ctx, procs)
 	lsofCmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F", "pn")
 	lsofOut, err := lsofCmd.Output()
 	if err != nil {
@@ -191,6 +186,18 @@ func takeDarwin(ctx context.Context) (Snapshot, error) {
 		}
 	}
 	return Snapshot{Processes: procs, OutboundPorts: ParseLsofF(string(lsofOut))}, nil
+}
+
+func readDarwinProcesses(ctx context.Context) ([]Process, error) {
+	psOut, err := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "%cpu=", "-o", "rss=", "-o", "command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	procs, err := ParsePSResource(string(psOut))
+	if err != nil {
+		return nil, err
+	}
+	return attachExePaths(ctx, procs), nil
 }
 
 // attachExePaths fills Exe from `ps -o comm=`. The path is its own column,

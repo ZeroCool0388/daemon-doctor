@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,35 @@ func TestParseStatCommWithSpaces(t *testing.T) {
 	}
 	if name != "example desktop" || ppid != 7 {
 		t.Fatalf("name %q ppid %d", name, ppid)
+	}
+}
+
+func TestReadProcCapturesStartTime(t *testing.T) {
+	root := t.TempDir()
+	writeProc(t, root, 10, 1, "example app (worker)", "/opt/example-app", "")
+	if err := os.MkdirAll(filepath.Join(root, "net"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	fields := make([]string, 20)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[0], fields[1], fields[19] = "S", "1", "123456789"
+	stat := "10 (example app (worker)) " + strings.Join(fields, " ") + "\n"
+	if err := os.WriteFile(filepath.Join(root, "10", "stat"), []byte(stat), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := ReadProc(root)
+	if err != nil || len(snap.Processes) != 1 || snap.Processes[0].StartTime != 123456789 {
+		t.Fatalf("start time not sampled: %+v %v", snap.Processes, err)
+	}
+	for _, bad := range []string{"", "10 (app) S 1", strings.Replace(stat, "123456789", "invalid", 1), strings.Replace(stat, "123456789", "-1", 1)} {
+		if got := parsePIDStartTime(bad); got != 0 {
+			t.Fatalf("bad stat accepted: %q = %d", bad, got)
+		}
 	}
 }
 

@@ -14,11 +14,15 @@ import (
 
 // Process is one running process.
 type Process struct {
-	PID         int
-	PPID        int
-	Name        string // kernel command name, or the executable base name
-	Exe         string // executable path, looked up separately from the command line
-	Cmd         string // full command line, including arguments
+	PID  int
+	PPID int
+	Name string // kernel command name, or the executable base name
+	Exe  string // executable path, looked up separately from the command line
+	Cmd  string // full command line, including arguments
+	// StartTime identifies a process lifetime within this OS boot. It is the
+	// kernel start time: microseconds on macOS, clock ticks on Linux. Zero
+	// means unavailable and must not authorize a signal based on PID alone.
+	StartTime   uint64
 	CPUKnown    bool
 	CPUPercent  float64 // share of the whole machine, 0 to 100
 	MemoryKnown bool

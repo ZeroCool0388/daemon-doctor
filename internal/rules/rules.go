@@ -157,7 +157,10 @@ func (e *Engine) Decide(p plugins.Plugin, outcomes []checks.Outcome) Verdict {
 				action = plugins.FixKickstart
 			}
 		case KindMissingFlags:
-			if plugins.Approved(p, plugins.FixRestart) {
+			if plugins.Approved(p, plugins.FixRelaunch) {
+				offer = true
+				action = plugins.FixRelaunch
+			} else if plugins.Approved(p, plugins.FixRestart) {
 				offer = true
 				action = plugins.FixRestart
 			}

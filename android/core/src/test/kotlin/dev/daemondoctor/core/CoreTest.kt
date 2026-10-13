@@ -13,6 +13,54 @@ import java.io.File
 
 class CoreTest {
     @Test
+    fun relaunchIsAllowlistedWithoutAcceptingCommandText() {
+        val page = """{"events":[{"id":4,"kind":"alerts","body":{"alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_id":"example-app","service_name":"Example App","kind":"missing_flags","message":"Required settings are missing.","actions":["relaunch","relaunch; touch marker"]}}]}"""
+        val event = parseEvents(page).single()
+        val alert = requireNotNull(alertFromRelay(event.body, 1_700_000_000))
+        assertEquals(listOf("relaunch"), alert.actions)
+        assertEquals("relaunch", fixIdFor(alert, AlertButton.Fix))
+        assertEquals(listOf(AlertButton.Fix, AlertButton.Ignore, AlertButton.Details), buttonsFor(alert))
+        assertEquals(listOf(AlertButton.Ignore, AlertButton.Details), buttonsFor(alert.copy(actions = listOf("relaunch; touch marker"))))
+        val approval = Approval("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "relaunch", "cccccccccccccccccccccccccccccccc", 1_700_000_100L, ByteArray(32), ByteArray(64))
+        assertNull(approvalShapeError(approval))
+        assertEquals("wrong_fix", approvalShapeError(approval.copy(fixId = "relaunch; touch marker")))
+    }
+
+    @Test
+    fun relaunchFixButtonPostsSignedApproval() {
+        val http = RecordingHttp()
+        val signer = SoftwareSigner(ByteArray(32) { 9 })
+        val session = Session(signer, http) { 1_700_000_000 }
+        val payload = "daemon-doctor:2:0123456789abcdef0123456789abcdef:${b64Url(ByteArray(32) { 1 })}:00112233445566778899aabbccddeeff:https://relay.example.invalid"
+        assertTrue(session.restore(payload))
+        http.nextBody = """{"events":[{"id":4,"kind":"alerts","body":{"alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_id":"example-app","service_name":"Example App","kind":"missing_flags","message":"Required settings are missing.","actions":["relaunch"]}}]}"""
+        assertNull(session.poll())
+        val alert = session.snapshot().alerts.single()
+        assertEquals(listOf(AlertButton.Fix, AlertButton.Ignore, AlertButton.Details), buttonsFor(alert))
+        assertNull(session.press(alert.id, AlertButton.Fix))
+        val post = http.calls.single { it.method == "POST" }
+        assertTrue(post.url.endsWith("/v1/macs/0123456789abcdef0123456789abcdef/approvals"))
+        val sent = Json.parseToJsonElement(requireNotNull(post.body)).jsonObject
+        assertFalse(jsonHasCommand(sent))
+        assertEquals("relaunch", sent.string("fix_id"))
+        assertEquals(alert.id, sent.string("alert_id"))
+        val approval = Approval(
+            macId = sent.string("mac_id"),
+            alertId = sent.string("alert_id"),
+            fixId = sent.string("fix_id"),
+            nonce = sent.string("nonce"),
+            expiresUnix = sent.string("expires_unix").toLong(),
+            publicKey = b64UrlDecode(sent.string("public_key")),
+            signature = b64UrlDecode(sent.string("signature")),
+        )
+        assertNull(approvalShapeError(approval))
+        assertEquals(1_700_000_000 + APPROVAL_TTL_SECONDS, approval.expiresUnix)
+        assertTrue(verifyEd25519(signer.publicKey, canonicalBytes(approval), approval.signature))
+        assertTrue(session.snapshot().alerts.isEmpty())
+        assertEquals("Sent relaunch", session.snapshot().history.single().outcome)
+    }
+
+    @Test
     fun pairingProofMatchesTheMacWithoutSendingSecret() {
         val vector = Json.parseToJsonElement(File("../../testdata/pairing-vector.json").readText()).jsonObject
         val payload = "daemon-doctor:2:${vector.string("mac_id")}:${vector.string("mac_public_key")}:${vector.string("secret")}:https://your-relay.example.workers.dev"

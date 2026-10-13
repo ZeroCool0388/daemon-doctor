@@ -127,7 +127,7 @@ func TestUsage(t *testing.T) {
 	if code := Run([]string{"daemon-doctor", "help"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("help code %d", code)
 	}
-	if !strings.Contains(stdout.String(), "dry-run") {
+	if !strings.Contains(stdout.String(), "dry-run") || !strings.Contains(stdout.String(), "relaunch") {
 		t.Fatalf("stdout: %s", stdout.String())
 	}
 }

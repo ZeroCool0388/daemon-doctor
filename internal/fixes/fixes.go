@@ -1,4 +1,4 @@
-// Package fixes runs stop, restart, force-restart, and launchctl_kickstart.
+// Package fixes runs stop, restart, force-restart, relaunch, and launchctl_kickstart.
 // The action has to be on the plug-in's allowlist, except an unwatched
 // stop which the caller has already authorized. Dry-run does not signal
 // or launch anything, and every attempt is rechecked. stop never launches.
@@ -37,6 +37,7 @@ type Result struct {
 	Launched    string
 	SignalError string
 	LaunchError string
+	QuitError   string
 	Outcomes    []checks.Outcome
 	Fixed       bool
 	Message     string
@@ -66,6 +67,14 @@ func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dry
 		return Result{}, fmt.Errorf("fix %q is not approved for %s", action, p.ID)
 	}
 	fix := p.Fixes[action]
+	if action == plugins.FixRelaunch {
+		// Also validate at execution time; callers cannot supply an arbitrary
+		// app or launcher through a fix request.
+		if err := plugins.Validate(&p, plugins.BuiltinCosts()); err != nil {
+			return Result{}, err
+		}
+		return r.applyRelaunch(ctx, p, p.Fixes[action], dryRun, start)
+	}
 	if action == plugins.FixKickstart {
 		return r.applyKickstart(ctx, p, fix, dryRun, start)
 	}
@@ -208,7 +217,7 @@ func (r *Runner) applyKickstart(ctx context.Context, p plugins.Plugin, fix plugi
 }
 
 func (r *Runner) finish(ctx context.Context, p plugins.Plugin, res Result, start time.Time) (Result, error) {
-	recheck, err := r.Source.Take(ctx)
+	recheck, err := r.take(ctx)
 	if err != nil {
 		res.Duration = time.Since(start)
 		res.Message = plainMessage(p.Name, res)

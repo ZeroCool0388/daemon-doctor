@@ -1,0 +1,15 @@
+# Copy into your local plug-in directory and replace the example values.
+id: example-flagged-app
+name: Example App
+process:
+  match: example-app
+checks:
+  - type: process_running
+  - type: launched_with_flags
+    flags: ["--required-setting"]
+fixes:
+  relaunch:
+    kind: relaunch
+    app: Example App
+    launcher: ~/bin/app-launch.sh
+    quit_timeout: 5s

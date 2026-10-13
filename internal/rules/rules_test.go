@@ -69,6 +69,42 @@ func TestMissingFlagsOffersRestart(t *testing.T) {
 	}
 }
 
+func TestMissingFlagsPrefersApprovedRelaunchAndRetainsLockout(t *testing.T) {
+	p := plugin()
+	p.Fixes[plugins.FixRelaunch] = plugins.Fix{Kind: plugins.FixRelaunch}
+	eng := NewEngine(nil)
+	bad := []checks.Outcome{{Type: plugins.CheckProcessRunning, Healthy: true}, {Type: plugins.CheckLaunchedWithFlags, Failed: true, MissingFlags: true}}
+	for incident := 0; incident < 3; incident++ {
+		got := eng.Decide(p, bad)
+		if len(got.Alerts) != 1 {
+			t.Fatalf("incident %d: %+v", incident, got)
+		}
+		a := got.Alerts[0]
+		if incident < 2 {
+			if !a.OfferFix || a.Action != plugins.FixRelaunch || len(a.Actions) != 1 || a.Actions[0] != plugins.FixRelaunch {
+				t.Fatalf("offer: %+v", a)
+			}
+		} else if a.Kind != KindKeepsHappening || a.OfferFix || eng.AlertActive(Alert{ServiceID: p.ID, Kind: KindMissingFlags, OfferFix: true}) {
+			t.Fatalf("lockout bypassed: %+v", a)
+		}
+		if again := eng.Decide(p, bad); len(again.Alerts) != 0 {
+			t.Fatal("unchanged missing flags repeated alert")
+		}
+		eng.Decide(p, healthy())
+	}
+	// Relaunch is only offered for missing flags, not a down or stuck app.
+	for _, outcome := range [][]checks.Outcome{notRunning(), stuck()} {
+		fresh := NewEngine(nil)
+		first := fresh.Decide(p, outcome)
+		got := fresh.Decide(p, outcome)
+		for _, a := range append(first.Alerts, got.Alerts...) {
+			if a.Action == plugins.FixRelaunch {
+				t.Fatalf("wrong incident: %+v", a)
+			}
+		}
+	}
+}
+
 func TestLaunchdJobOffersKickstart(t *testing.T) {
 	eng := NewEngine(func() time.Time { return time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC) })
 	p := plugin()

@@ -130,6 +130,7 @@ func readProcess(root string, pid int) (Process, error) {
 		}
 	}
 	proc := Process{PID: pid, PPID: ppid, Name: name, Exe: exe, Cmd: cmd}
+	proc.StartTime = parsePIDStartTime(string(statRaw))
 	if statm, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "statm")); err == nil {
 		if pages, ok := parseStatmResident(string(statm)); ok {
 			proc.MemoryKnown = true
@@ -157,6 +158,24 @@ func parseStat(text string) (name string, ppid int, err error) {
 		return "", 0, fmt.Errorf("stat parent pid: %w", err)
 	}
 	return name, ppid, nil
+}
+
+// /proc/pid/stat field 22 is the start time in clock ticks since boot.
+// The command in parentheses can itself contain spaces and parentheses.
+func parsePIDStartTime(text string) uint64 {
+	close := strings.LastIndex(text, ")")
+	if close < 0 {
+		return 0
+	}
+	fields := strings.Fields(text[close+1:]) // starts at field 3 (state)
+	if len(fields) < 20 {
+		return 0
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return start
 }
 
 func splitCmdline(raw []byte) []string {
