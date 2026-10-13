@@ -1,5 +1,5 @@
 # Placeholder config. Copy to ~/.config/daemon-doctor/config.yaml.
-# No keys or account data belong here. Leave relay.url unset to stay local.
+# No keys, topics or account data belong here. Optional notifications default off.
 # relay:
 #   url: https://your-relay.example.workers.dev
 #   mcp_link: false # Enable outbound remote MCP independently of phone pairing.
@@ -43,3 +43,11 @@ interval: 30s
 control:
   enabled: true
   allow_fixes: false
+
+# Optional ntfy phone alerts. Keep the real config outside a Git checkout.
+# Run daemon-doctor ntfy-setup to generate a private topic and enable alerts.
+notify:
+  ntfy:
+    enabled: false
+    server: https://ntfy.sh
+    topic: ""

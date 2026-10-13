@@ -22,6 +22,7 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/mcpserver"
+	"github.com/ZeroCool0388/daemon-doctor/internal/notify"
 	"github.com/ZeroCool0388/daemon-doctor/internal/offers"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
@@ -49,6 +50,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fixCmd(args[2:], stdin, stdout, stderr)
 	case "pair":
 		return pairCmd(args[2:], stdout, stderr)
+	case "ntfy-setup":
+		return ntfySetupCmd(args[2:], stdout, stderr)
 	case "mcp-token":
 		return mcpTokenCmd(args[2:], stdout, stderr)
 	case "mcp":
@@ -73,6 +76,7 @@ Usage:
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
   daemon-doctor demo
+  daemon-doctor ntfy-setup [--config path]
   daemon-doctor mcp-token [--config path]
   daemon-doctor mcp [--config path] [--demo] [--allow-fixes]
 
@@ -137,6 +141,14 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	defer book.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	sender, err := notify.New(cfg.Ntfy)
+	if err != nil {
+		fmt.Fprintln(stderr, "notification configuration error")
+		return 1
+	}
+	if sender != nil {
+		d.UseNotifier(sender)
+	}
 	if cfg.ControlEnabled || cfg.RelayMCPLink {
 		store, e := offers.Open(filepath.Dir(cfg.ControlSocket))
 		if e != nil {

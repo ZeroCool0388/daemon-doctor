@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,12 +12,13 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ZeroCool0388/daemon-doctor/internal/notify"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the on-disk program config.
-// RelayURL is optional. An empty value keeps the program local.
+// RelayURL is optional. Ntfy notifications can run independently of it.
 type Config struct {
 	PluginsDir        string
 	LogPath           string
@@ -27,6 +29,7 @@ type Config struct {
 	ControlEnabled    bool
 	ControlAllowFixes bool
 	ControlSocket     string
+	Ntfy              notify.Config
 }
 
 type controlConfig struct {
@@ -35,6 +38,7 @@ type controlConfig struct {
 }
 
 type file struct {
+	Notify     *notifyConfig  `yaml:"notify" toml:"notify"`
 	Control    *controlConfig `yaml:"control" toml:"control"`
 	PluginsDir string         `yaml:"plugins_dir" toml:"plugins_dir"`
 	LogPath    string         `yaml:"log_path" toml:"log_path"`
@@ -42,6 +46,10 @@ type file struct {
 	RelayURL   string         `yaml:"relay_url" toml:"relay_url"`
 	Relay      *relayConfig   `yaml:"relay" toml:"relay"`
 	StateDir   string         `yaml:"state_dir" toml:"state_dir"`
+}
+
+type notifyConfig struct {
+	Ntfy notify.Config `yaml:"ntfy" toml:"ntfy"`
 }
 
 type relayConfig struct {
@@ -56,25 +64,34 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+	return loadData(path, data)
+}
+
+func loadData(path string, data []byte) (loaded Config, loadErr error) {
 	var raw file
+	defer func() {
+		if raw.Notify != nil && raw.Notify.Ntfy.Topic != "" && loadErr != nil {
+			loadErr = errors.New(strings.ReplaceAll(loadErr.Error(), raw.Notify.Ntfy.Topic, "[private]"))
+		}
+	}()
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".yaml", ".yml":
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
 		if err := dec.Decode(&raw); err != nil {
-			return Config{}, fmt.Errorf("parse config: %w", err)
+			return Config{}, errors.New("parse config: invalid configuration")
 		}
 		var extra yaml.Node
 		if err := dec.Decode(&extra); err != io.EOF {
 			if err == nil {
 				return Config{}, fmt.Errorf("parse config: file contains more than one document")
 			}
-			return Config{}, fmt.Errorf("parse config: %w", err)
+			return Config{}, errors.New("parse config: invalid configuration")
 		}
 	case ".toml":
 		md, err := toml.NewDecoder(bytes.NewReader(data)).Decode(&raw)
 		if err != nil {
-			return Config{}, fmt.Errorf("parse config: %w", err)
+			return Config{}, errors.New("parse config: invalid configuration")
 		}
 		if undecoded := md.Undecoded(); len(undecoded) > 0 {
 			return Config{}, fmt.Errorf("parse config: unknown field %s", undecoded[0])
@@ -117,6 +134,14 @@ func Load(path string) (Config, error) {
 	if mcpLink && relayURL == "" {
 		return Config{}, fmt.Errorf("relay.mcp_link requires relay.url")
 	}
+	ntfy := notify.Config{}
+	if raw.Notify != nil {
+		ntfy = raw.Notify.Ntfy
+	}
+	ntfy, err = ntfy.Clean()
+	if err != nil {
+		return Config{}, err
+	}
 	stateDir := dir
 	if strings.TrimSpace(raw.StateDir) != "" {
 		stateDir = resolve(dir, raw.StateDir)
@@ -136,6 +161,7 @@ func Load(path string) (Config, error) {
 		RelayURL:     relayURL,
 		RelayMCPLink: mcpLink,
 		StateDir:     stateDir,
+		Ntfy:         ntfy,
 	}, nil
 }
 
