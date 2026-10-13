@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/ci.yml)
 
-**A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and runs a locally allowlisted fix after a signed phone approval or local confirmation.
+**A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and runs a locally allowlisted fix after a signed phone approval or local confirmation. Local MCP tools let an LLM client inspect health and request a configured fix.
 
 Fixed rules, one Go binary, one plug-in file per service. The Mac runs as the normal user and connects outward to a relay mailbox; it opens no inbound ports.
 
@@ -34,6 +34,17 @@ Scene 1. Example Desktop App is stuck, then force-restarted.
 
 The replay also covers network recovery, an unwatched CPU hog and repeated failures. It uses fictional services and a scripted clock, with no accounts, keys, config or network. The Android app also starts in demo mode.
 
+## Use with Cursor, Codex or Claude
+
+`daemon-doctor mcp` exposes service health, check details, recent events and
+current fix offers through the running daemon's private local socket. Live
+fixes are disabled by default. `daemon-doctor mcp --demo` lets you try all
+five tools against scripted fake incidents without config or network.
+
+See [setup examples and approval requirements](docs/mcp.md) for each client.
+MCP destructive annotations cannot enforce human approval: live fixes need
+both daemon and MCP opt-in, plus a client configured to confirm each call.
+
 ## Architecture
 
 ```mermaid
@@ -43,6 +54,9 @@ flowchart LR
     C --> R[Fixed rules]
     R --> L[(Local log)]
     V[Approval verifier] --> F[Allowlisted fix]
+    M[Stdio MCP] --> U[Private Unix socket]
+    U --> R
+    U -- local offer + opt-in --> F
     F --> C
     F --> L
   end
@@ -97,7 +111,7 @@ The supplied plug-ins are starting points: configure launchers before relying on
 | CPU or memory pressure | Sustained resource use names the culprit. An unwatched process can only be stopped. |
 | Network down or sleep | Service checks pause; network recovery produces a summary. |
 | Low disk | Reports the condition without offering a fix. |
-| Repeated failures | Three incidents in an hour stop phone fix offers. |
+| Repeated failures | Three incidents in an hour stop new fix offers. |
 
 Thresholds live in the plug-in files. Fixes are re-checked and logged locally. The signed-approval path also attempts to post outcomes to the relay's `results` mailbox when a relay is configured; ordinary local CLI fixes report outcomes in the terminal and local log.
 

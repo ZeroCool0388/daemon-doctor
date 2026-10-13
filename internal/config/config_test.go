@@ -110,3 +110,25 @@ func TestNestedRelayConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestControlDefaultsAndOptIn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	for _, tc := range []struct {
+		extra          string
+		enabled, fixes bool
+	}{
+		{"", true, false}, {"control:\n  enabled: false\n", false, false}, {"control:\n  allow_fixes: true\n", true, true},
+	} {
+		if err := os.WriteFile(path, []byte("plugins_dir: plugins\nlog_path: events.jsonl\ninterval: 30s\nstate_dir: state\n"+tc.extra), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ControlEnabled != tc.enabled || cfg.ControlAllowFixes != tc.fixes || cfg.ControlSocket != filepath.Join(dir, "state", "control", "control.sock") {
+			t.Fatalf("control config %+v", cfg)
+		}
+	}
+}

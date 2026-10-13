@@ -18,20 +18,29 @@ import (
 // Config is the on-disk program config.
 // RelayURL is optional. An empty value keeps the program local.
 type Config struct {
-	PluginsDir string
-	LogPath    string
-	Interval   time.Duration
-	RelayURL   string
-	StateDir   string
+	PluginsDir        string
+	LogPath           string
+	Interval          time.Duration
+	RelayURL          string
+	StateDir          string
+	ControlEnabled    bool
+	ControlAllowFixes bool
+	ControlSocket     string
+}
+
+type controlConfig struct {
+	Enabled    *bool `yaml:"enabled" toml:"enabled"`
+	AllowFixes bool  `yaml:"allow_fixes" toml:"allow_fixes"`
 }
 
 type file struct {
-	PluginsDir string       `yaml:"plugins_dir" toml:"plugins_dir"`
-	LogPath    string       `yaml:"log_path" toml:"log_path"`
-	Interval   string       `yaml:"interval" toml:"interval"`
-	RelayURL   string       `yaml:"relay_url" toml:"relay_url"`
-	Relay      *relayConfig `yaml:"relay" toml:"relay"`
-	StateDir   string       `yaml:"state_dir" toml:"state_dir"`
+	Control    *controlConfig `yaml:"control" toml:"control"`
+	PluginsDir string         `yaml:"plugins_dir" toml:"plugins_dir"`
+	LogPath    string         `yaml:"log_path" toml:"log_path"`
+	Interval   string         `yaml:"interval" toml:"interval"`
+	RelayURL   string         `yaml:"relay_url" toml:"relay_url"`
+	Relay      *relayConfig   `yaml:"relay" toml:"relay"`
+	StateDir   string         `yaml:"state_dir" toml:"state_dir"`
 }
 
 type relayConfig struct {
@@ -106,7 +115,15 @@ func Load(path string) (Config, error) {
 	if strings.TrimSpace(raw.StateDir) != "" {
 		stateDir = resolve(dir, raw.StateDir)
 	}
+	enabled, allowFixes := true, false
+	if raw.Control != nil {
+		if raw.Control.Enabled != nil {
+			enabled = *raw.Control.Enabled
+		}
+		allowFixes = raw.Control.AllowFixes
+	}
 	return Config{
+		ControlEnabled: enabled, ControlAllowFixes: allowFixes, ControlSocket: filepath.Join(stateDir, "control", "control.sock"),
 		PluginsDir: resolve(dir, raw.PluginsDir),
 		LogPath:    resolve(dir, raw.LogPath),
 		Interval:   interval,

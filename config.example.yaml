@@ -36,3 +36,9 @@ interval: 30s
 #   launchctl_kickstart:
 #     kind: launchctl_kickstart
 #     label: Example Health
+
+# Private local MCP control. Live fixes also require --allow-fixes in the MCP client
+# and a host configured to ask for approval on every run_fix call.
+control:
+  enabled: true
+  allow_fixes: false
