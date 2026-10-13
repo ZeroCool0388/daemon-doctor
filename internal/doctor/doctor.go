@@ -85,6 +85,10 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 	}
 	runner := checks.NewRunner(reg)
 	runner.Now = now
+	// CLI fixes can sample and recheck before the first monitoring cycle.
+	if hinted, ok := src.(sysprobe.Hinted); ok {
+		hinted.SetHints(hintsFor(list))
+	}
 	return &Doctor{
 		Plugins:    list,
 		Source:     src,

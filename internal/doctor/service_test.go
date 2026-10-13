@@ -56,3 +56,52 @@ func TestScreenSharingIdleFailureAndRecovery(t *testing.T) {
 		})
 	}
 }
+
+// Mimic a live source that includes service readings only for configured hints.
+type hintedFixSource struct {
+	hints sysprobe.ProbeHints
+	takes int
+	state sysprobe.ServiceState
+}
+
+func (s *hintedFixSource) SetHints(hints sysprobe.ProbeHints) { s.hints = hints }
+
+func (s *hintedFixSource) Take(context.Context) (sysprobe.Snapshot, error) {
+	s.takes++
+	snap := sysprobe.Snapshot{Services: make(map[sysprobe.ServiceHint]sysprobe.ServiceState)}
+	for _, hint := range s.hints.Services {
+		snap.Services[hint] = s.state
+	}
+	return snap, nil
+}
+
+func TestScreenSharingFixRechecksWithHintsBeforeFirstCycle(t *testing.T) {
+	p, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "screen-sharing.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		state sysprobe.ServiceState
+		fixed bool
+	}{
+		{name: "idle enabled", state: sysprobe.ServiceState{Loaded: true, Known: true}, fixed: true},
+		{name: "disabled", state: sysprobe.ServiceState{Known: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &hintedFixSource{state: tc.state}
+			d, err := New([]plugins.Plugin{p}, src, nil, nil, nil, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The CLI fix command calls ApplyFix directly, without Cycle.
+			res, err := d.ApplyFix(context.Background(), p.ID, plugins.FixRestart, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if src.takes != 2 || res.Fixed != tc.fixed || len(res.Outcomes) != 1 || res.Outcomes[0].Skipped {
+				t.Fatalf("takes=%d, recheck=%+v", src.takes, res)
+			}
+		})
+	}
+}

@@ -12,10 +12,17 @@ func TestReadSystemServices(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		launchctl string
+		policy    string
 		lsof      string
 		want      ServiceState
 	}{
 		{name: "loaded but never started", launchctl: "printf 'system/com.apple.screensharing = {\n state = not running\n runs = 0\n}\n'\n", lsof: "exit 2\n", want: ServiceState{Loaded: true, Known: true}},
+		{name: "registered but disabled", launchctl: "exit 0\n", policy: "printf 'disabled services = {\n \"com.apple.screensharing\" => true\n}\n'\n", lsof: "exit 1\n", want: ServiceState{Known: true}},
+		{name: "registered but disabled text policy", launchctl: "exit 0\n", policy: "printf 'disabled services = {\n \"com.apple.screensharing\" => disabled\n}\n'\n", lsof: "exit 1\n", want: ServiceState{Known: true}},
+		{name: "disabled with listening port", launchctl: "exit 0\n", policy: "printf 'disabled services = {\n \"com.apple.screensharing\" => true\n}\n'\n", lsof: "printf 'n*:5900\n'\n", want: ServiceState{Listening: true, Known: true}},
+		{name: "registered with unreadable policy", launchctl: "exit 0\n", policy: "exit 1\n", lsof: "exit 1\n"},
+		{name: "registered with malformed policy", launchctl: "exit 0\n", policy: "printf 'unrecognized output\n'\n", lsof: "exit 1\n"},
+		{name: "listener despite unreadable policy", launchctl: "exit 0\n", policy: "exit 1\n", lsof: "printf 'n*:5900\n'\n", want: ServiceState{Listening: true, Known: true}},
 		{name: "disabled and not listening", launchctl: missing, lsof: "exit 1\n", want: ServiceState{Known: true}},
 		{name: "IPv4 listener fallback", launchctl: missing, lsof: "printf 'p1\nf5\nn*:5900\n'\n", want: ServiceState{Listening: true, Known: true}},
 		{name: "IPv6 listener fallback", launchctl: missing, lsof: "printf 'p1\nf5\nn[::1]:5900\n'\n", want: ServiceState{Listening: true, Known: true}},
@@ -30,7 +37,11 @@ func TestReadSystemServices(t *testing.T) {
 			dir := t.TempDir()
 			if tc.launchctl != "" {
 				// Check the system domain, not the GUI domain used for jobs.
-				body := "[ \"$*\" = 'print system/com.apple.screensharing' ] || exit 2\n" + tc.launchctl
+				policy := tc.policy
+				if policy == "" {
+					policy = "printf 'disabled services = {\n}\n'\n"
+				}
+				body := "case \"$*\" in\n 'print system/com.apple.screensharing')\n" + tc.launchctl + ";;\n 'print-disabled system')\n" + policy + ";;\n *) exit 2 ;;\nesac\n"
 				writeProbeCommand(t, dir, "launchctl", body)
 			}
 			if tc.lsof != "" {
@@ -41,6 +52,34 @@ func TestReadSystemServices(t *testing.T) {
 			got := readSystemServices(context.Background(), []ServiceHint{{Label: "com.apple.screensharing", Port: 5900}})
 			if got[ServiceHint{Label: "com.apple.screensharing", Port: 5900}] != tc.want {
 				t.Fatalf("state %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseLaunchdDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		text     string
+		disabled bool
+		known    bool
+	}{
+		{name: "boolean disabled", text: "disabled services = {\n \"com.apple.screensharing\" => true\n}", disabled: true, known: true},
+		{name: "text disabled", text: "disabled services = {\n \"com.apple.screensharing\" => disabled\n}", disabled: true, known: true},
+		{name: "boolean enabled", text: "disabled services = {\n \"com.apple.screensharing\" => false\n}", known: true},
+		{name: "text enabled", text: "disabled services = {\n \"com.apple.screensharing\" => enabled\n}", known: true},
+		{name: "no override", text: "disabled services = { }", known: true},
+		{name: "other label", text: "disabled services = {\n \"com.apple.screensharing.helper\" => true\n}", known: true},
+		{name: "empty output"},
+		{name: "truncated output", text: "disabled services = {\n \"com.apple.screensharing\" => true"},
+		{name: "unknown value", text: "disabled services = {\n \"com.apple.screensharing\" => unknown\n}"},
+		{name: "unquoted label", text: "disabled services = {\n com.apple.screensharing => true\n}"},
+		{name: "duplicate label", text: "disabled services = {\n \"com.apple.screensharing\" => true\n \"com.apple.screensharing\" => false\n}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disabled, known := parseLaunchdDisabled(tc.text, "com.apple.screensharing")
+			if disabled != tc.disabled || known != tc.known {
+				t.Fatalf("disabled=%v known=%v, want disabled=%v known=%v", disabled, known, tc.disabled, tc.known)
 			}
 		})
 	}

@@ -24,14 +24,15 @@ func readSystemServices(ctx context.Context, hints []ServiceHint) map[ServiceHin
 	return out
 }
 
-// A successful print means the service is loaded, even if it has never run.
-// A missing executable, timeout or permission error is an unknown reading.
+// A registered service is available on demand only when its disabled policy
+// can be read and does not disable it. Failed policy reads remain unknown.
 func systemServiceLoaded(ctx context.Context, label string) (loaded, known bool) {
 	cctx, cancel := context.WithTimeout(ctx, hostReadTimeout)
 	defer cancel()
 	_, err := exec.CommandContext(cctx, "launchctl", "print", "system/"+label).Output()
 	if err == nil {
-		return true, true
+		disabled, known := systemServiceDisabled(ctx, label)
+		return known && !disabled, known
 	}
 	if cctx.Err() != nil {
 		return false, false
@@ -41,6 +42,60 @@ func systemServiceLoaded(ctx context.Context, label string) (loaded, known bool)
 		return false, true
 	}
 	return false, false
+}
+
+func systemServiceDisabled(ctx context.Context, label string) (disabled, known bool) {
+	cctx, cancel := context.WithTimeout(ctx, hostReadTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, "launchctl", "print-disabled", "system").Output()
+	if err != nil || cctx.Err() != nil {
+		return false, false
+	}
+	return parseLaunchdDisabled(string(out), label)
+}
+
+// An absent override in a readable dictionary does not disable a registered
+// service. Match quoted labels exactly so another service's policy cannot apply.
+func parseLaunchdDisabled(text, label string) (disabled, known bool) {
+	header, body, ok := strings.Cut(strings.TrimSpace(text), "{")
+	if !ok || strings.TrimSpace(header) != "disabled services =" {
+		return false, false
+	}
+	body, ok = strings.CutSuffix(strings.TrimSpace(body), "}")
+	if !ok {
+		return false, false
+	}
+	found := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=>")
+		if !ok {
+			return false, false
+		}
+		key, err := strconv.Unquote(strings.TrimSpace(key))
+		if err != nil {
+			return false, false
+		}
+		var policy bool
+		switch strings.TrimSpace(value) {
+		case "true", "disabled":
+			policy = true
+		case "false", "enabled":
+			policy = false
+		default:
+			return false, false
+		}
+		if key == label {
+			if found {
+				return false, false
+			}
+			disabled, found = policy, true
+		}
+	}
+	return disabled, true
 }
 
 // Inspect listening sockets without opening a connection that could activate

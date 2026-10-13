@@ -23,7 +23,7 @@ type liveSource struct {
 	hints ProbeHints
 }
 
-// SetHints records the launchd labels and file paths the next sample should read.
+// SetHints records the launchd jobs, services and files the next sample should read.
 func (s *liveSource) SetHints(h ProbeHints) {
 	s.mu.Lock()
 	s.hints = h
