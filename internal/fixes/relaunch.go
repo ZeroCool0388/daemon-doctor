@@ -247,8 +247,8 @@ func survivingOriginal(snap sysprobe.Snapshot, original map[int]sysprobe.Process
 }
 
 func sameProcess(old, current sysprobe.Process) bool {
-	return old.StartTime != 0 && old.StartTime == current.StartTime &&
-		old.Name == current.Name && old.Exe == current.Exe && old.Cmd == current.Cmd
+	// exec changes the image and arguments, but not the process lifetime.
+	return old.PID == current.PID && old.StartTime != 0 && old.StartTime == current.StartTime
 }
 
 // Re-sample before each signal: the PID can be reused after the timeout sample

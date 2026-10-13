@@ -21,13 +21,12 @@ func TestDarwinStartTimeKeepsMicrosecondPrecision(t *testing.T) {
 	}
 }
 
-func TestAttachStartTimesForCurrentDarwinProcess(t *testing.T) {
-	procs := []Process{{PID: os.Getpid()}}
-	first := attachStartTimes(context.Background(), procs)[0].StartTime
+func TestDarwinStartTimesForCurrentProcess(t *testing.T) {
+	first := darwinStartTimes(context.Background())[os.Getpid()]
 	if first == 0 {
 		t.Skip("kernel process start time is unavailable in this environment")
 	}
-	second := attachStartTimes(context.Background(), procs)[0].StartTime
+	second := darwinStartTimes(context.Background())[os.Getpid()]
 	if second != first {
 		t.Fatalf("same lifetime changed: %d %d", first, second)
 	}

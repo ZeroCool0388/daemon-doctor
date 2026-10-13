@@ -3,6 +3,7 @@ package fixes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -220,6 +221,7 @@ func TestRelaunchDoesNotKillReplacementProcess(t *testing.T) {
 	ctrl := &relaunchCtrl{quit: func(context.Context) error {
 		replacement := flaggedTree(false)
 		replacement.Processes[0].Cmd += " --other"
+		replacement.Processes[0].StartTime++
 		src.Set(replacement)
 		return nil
 	}}
@@ -297,6 +299,68 @@ func TestSurvivingOriginalKeepsUnverifiedPIDPresent(t *testing.T) {
 	replacement.Processes[1].StartTime = 1001
 	if alive := survivingOriginal(replacement, original); len(alive) != 1 || alive[6].StartTime != 1001 {
 		t.Fatalf("unknown original lifetime treated as exited: %+v", alive)
+	}
+}
+
+func TestSurvivingOriginalRecognizesExecAsSameLifetime(t *testing.T) {
+	initial := flaggedTree(false)
+	original := processIdentities(initial, []int{4, 6})
+	execed := flaggedTree(false)
+	for i := range execed.Processes {
+		execed.Processes[i].Name = "worker"
+		execed.Processes[i].Exe = "/opt/worker"
+		execed.Processes[i].Cmd = "worker --different-args"
+	}
+	if alive := survivingOriginal(execed, original); len(alive) != 2 {
+		t.Fatalf("exec treated as process exit: %+v", alive)
+	}
+	// The start time alone is not enough: the PID must also match.
+	otherPID := execed.Processes[0]
+	otherPID.PID++
+	if sameProcess(initial.Processes[0], otherPID) {
+		t.Fatal("different PID treated as the same lifetime")
+	}
+}
+
+func TestRelaunchWaitsForTrackedLifetimeAfterExec(t *testing.T) {
+	for _, pid := range []int{4, 6} {
+		t.Run(fmt.Sprintf("pid-%d", pid), func(t *testing.T) {
+			src := &sysprobe.MemSource{}
+			src.Set(flaggedTree(false))
+			ctrl := &relaunchCtrl{}
+			var deadline time.Time
+			ctrl.quit = func(ctx context.Context) error {
+				deadline, _ = ctx.Deadline()
+				for _, proc := range flaggedTree(false).Processes {
+					if proc.PID == pid {
+						// This tracked process execs and, for the child case,
+						// outlives its parent. Its PID and start time stay fixed.
+						proc.PPID = 1
+						proc.Name, proc.Exe, proc.Cmd = "worker", "/opt/worker", "worker --different-args"
+						src.Set(sysprobe.Snapshot{Processes: []sysprobe.Process{proc}})
+					}
+				}
+				return nil
+			}
+			ctrl.signal = func(target int) error {
+				if target != pid || time.Now().Before(deadline) {
+					t.Fatalf("incorrect KILL target or grace wait: %d", target)
+				}
+				src.Set(sysprobe.Snapshot{})
+				return nil
+			}
+			ctrl.launch = func() error {
+				if !reflect.DeepEqual(ctrl.pids, []int{pid}) {
+					return errors.New("launched while tracked lifetime was still present")
+				}
+				src.Set(flaggedTree(true))
+				return nil
+			}
+			res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+			if err != nil || !res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{pid}) || len(ctrl.launches) != 1 {
+				t.Fatalf("exec lifetime not stopped before launch: %+v %v %+v", res, err, ctrl)
+			}
+		})
 	}
 }
 
