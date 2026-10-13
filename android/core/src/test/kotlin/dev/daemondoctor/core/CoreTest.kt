@@ -13,6 +13,16 @@ import java.io.File
 
 class CoreTest {
     @Test
+    fun relaunchIsAllowlistedWithoutAcceptingCommandText() {
+        val page = """{"events":[{"id":4,"kind":"alerts","body":{"alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","service_id":"example-app","service_name":"Example App","kind":"missing_flags","message":"Required settings are missing.","actions":["relaunch","relaunch; touch marker"]}}]}"""
+        val event = parseEvents(page).single()
+        assertEquals(listOf("relaunch"), requireNotNull(alertFromRelay(event.body, 1_700_000_000)).actions)
+        val approval = Approval("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "relaunch", "cccccccccccccccccccccccccccccccc", 1_700_000_100L, ByteArray(32), ByteArray(64))
+        assertNull(approvalShapeError(approval))
+        assertEquals("wrong_fix", approvalShapeError(approval.copy(fixId = "relaunch; touch marker")))
+    }
+
+    @Test
     fun pairingProofMatchesTheMacWithoutSendingSecret() {
         val vector = Json.parseToJsonElement(File("../../testdata/pairing-vector.json").readText()).jsonObject
         val payload = "daemon-doctor:2:${vector.string("mac_id")}:${vector.string("mac_public_key")}:${vector.string("secret")}:https://your-relay.example.workers.dev"

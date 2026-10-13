@@ -36,6 +36,7 @@ const (
 	FixRestart             = "restart"
 	FixForceRestart        = "force-restart"
 	FixKickstart           = "launchctl_kickstart"
+	FixRelaunch            = "relaunch"
 
 	// DefaultCPUPercent and DefaultDuration are used when a host plug-in
 	// omits them. The shipped this-mac plug-in sets both explicitly.
@@ -50,6 +51,7 @@ var FixAllowlist = map[string]struct{}{
 	FixRestart:      {},
 	FixForceRestart: {},
 	FixKickstart:    {},
+	FixRelaunch:     {},
 }
 
 // BuiltinCosts ranks built-in checks. Lower numbers are cheaper and must
@@ -134,15 +136,18 @@ type Messages struct {
 }
 
 // Fix is one approved action. Kind must be stop, restart, force-restart,
-// or launchctl_kickstart. Launcher, when set, is an absolute program path
+// relaunch, or launchctl_kickstart. Launcher, when set, is an absolute program path
 // executed directly with no shell. Args are the fixed arguments from this
 // file. stop never launches a program. launchctl_kickstart takes a label
-// and does not take a launcher.
+// and does not take a launcher. relaunch requires App and Launcher; QuitTimeout
+// bounds the graceful quit before a KILL fallback.
 type Fix struct {
-	Kind     string   `yaml:"kind" toml:"kind"`
-	Launcher string   `yaml:"launcher" toml:"launcher"`
-	Args     []string `yaml:"args" toml:"args"`
-	Label    string   `yaml:"label" toml:"label"`
+	Kind        string   `yaml:"kind" toml:"kind"`
+	Launcher    string   `yaml:"launcher" toml:"launcher"`
+	Args        []string `yaml:"args" toml:"args"`
+	Label       string   `yaml:"label" toml:"label"`
+	App         string   `yaml:"app" toml:"app"`
+	QuitTimeout string   `yaml:"quit_timeout" toml:"quit_timeout"`
 }
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -500,7 +505,7 @@ func normalizeFixes(p *Plugin) error {
 		key = strings.TrimSpace(key)
 		fix.Kind = strings.TrimSpace(fix.Kind)
 		if _, ok := FixAllowlist[key]; !ok {
-			return fmt.Errorf("fix %q is not on the allowlist (stop, restart, force-restart, launchctl_kickstart)", key)
+			return fmt.Errorf("fix %q is not on the allowlist (stop, restart, force-restart, relaunch, launchctl_kickstart)", key)
 		}
 		if _, dup := cleaned[key]; dup {
 			return fmt.Errorf("fix %q is listed more than once", key)
@@ -513,6 +518,9 @@ func normalizeFixes(p *Plugin) error {
 			return fmt.Errorf("fix %s: %w", key, err)
 		}
 		fix.Args = args
+		if key != FixRelaunch && (fix.App != "" || fix.QuitTimeout != "") {
+			return fmt.Errorf("%s does not take app or quit_timeout", key)
+		}
 		switch key {
 		case FixStop:
 			if strings.TrimSpace(fix.Launcher) != "" || len(fix.Args) != 0 || strings.TrimSpace(fix.Label) != "" {
@@ -544,6 +552,29 @@ func normalizeFixes(p *Plugin) error {
 			}
 			fix.Launcher = launcher
 			fix.Label = ""
+			if key == FixRelaunch {
+				fix.App = strings.TrimSpace(fix.App)
+				if fix.App == "" || len(fix.App) > 255 || strings.ContainsAny(fix.App, "\n\r\x00") {
+					return fmt.Errorf("relaunch needs an app name without control characters")
+				}
+				if launcher == "" {
+					return fmt.Errorf("relaunch needs a launcher")
+				}
+				sawFlags := false
+				for _, check := range p.Checks {
+					sawFlags = sawFlags || check.Type == CheckLaunchedWithFlags
+				}
+				if p.Host || !processConfigured(p.Process) || !sawFlags {
+					return fmt.Errorf("relaunch needs a process selector and launched_with_flags check")
+				}
+				if fix.QuitTimeout == "" {
+					fix.QuitTimeout = "5s"
+				}
+				d, err := time.ParseDuration(fix.QuitTimeout)
+				if err != nil || d <= 0 || d > 30*time.Second {
+					return fmt.Errorf("quit_timeout must be positive and at most 30s")
+				}
+			}
 		}
 		cleaned[key] = fix
 	}

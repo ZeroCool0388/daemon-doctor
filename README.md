@@ -185,13 +185,37 @@ Replace the example paths with the executable and arguments for your service. `r
 
 The supplied plug-ins are starting points: configure launchers before relying on their restart actions. Process selection also supports command-line substrings and regular expressions; checks include outbound TCP connections, required flags, recent files and launchd job results.
 
+For a macOS app that is running without required launch flags, configure `relaunch` in its local plug-in:
+
+```yaml
+id: example-flagged-app
+name: Example App
+process:
+  match: example-app
+checks:
+  - type: process_running
+  - type: launched_with_flags
+    flags: ["--required-setting"]
+fixes:
+  relaunch:
+    kind: relaunch
+    app: Example App
+    launcher: ~/bin/app-launch.sh
+    quit_timeout: 5s
+```
+
+Set `app` to the macOS app name and `launcher` to your local executable script that starts it with the required flags. `~` expands to your home directory. The script needs an executable bit and a shebang; it is run directly, with optional fixed `args`, without a shell command supplied by an approval.
+
+When the flags check fails, `relaunch` is offered ahead of `restart`. It asks the app to quit gracefully, waits up to `quit_timeout` (default 5 seconds, maximum 30 seconds), then uses KILL on surviving matched processes and their children, children first. It confirms exit before starting the launcher, waits up to 5 seconds for the required launch settings, and runs the full health checks. macOS may request Automation permission for the quit request. Dry runs perform no app control. The action uses the existing offer expiry, single-use approval, pause, and repeated-failure lockout checks.
+
 ### Alerts
 
 | Condition | Behaviour |
 |---|---|
 | Down | Two consecutive missing-process checks; offers an approved restart or launchd kickstart. |
 | Running but stuck | A failing health signal; offers an approved force restart. |
-| Missing flags or failed scheduled job | Offers the configured restart or kickstart. |
+| Missing flags | Offers the configured relaunch, or restart. |
+| Failed scheduled job | Offers the configured kickstart, or restart. |
 | CPU or memory pressure | Sustained resource use names the culprit. An unwatched process can only be stopped. |
 | Network down or sleep | Service checks pause; network recovery produces a summary. |
 | Low disk | Reports the condition without offering a fix. |

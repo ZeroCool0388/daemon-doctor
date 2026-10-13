@@ -8,7 +8,7 @@ const val APPROVAL_TTL_SECONDS = 10 * 60L
 const val CLOCK_SKEW_SECONDS = 60L
 
 private val HEX_ID = Regex("^[0-9a-f]{32}$")
-val ALLOWED_FIXES = setOf("stop", "restart", "force-restart", "launchctl_kickstart")
+val ALLOWED_FIXES = setOf("stop", "restart", "force-restart", "relaunch", "launchctl_kickstart")
 
 data class Approval(
     val macId: String,
