@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/notify"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
@@ -26,6 +28,411 @@ func queuedStates(d *Doctor) []string {
 		default:
 			return states
 		}
+	}
+}
+
+func captureNotifications(t *testing.T, d *Doctor) func() []notify.Event {
+	t.Helper()
+	sent := make(chan notify.Event, notificationQueueSize+1)
+	d.UseNotifier(notifyFunc(func(_ context.Context, event notify.Event) error {
+		sent <- event
+		return nil
+	}))
+	stop := d.startNotifications(context.Background())
+	t.Cleanup(stop)
+	return func() []notify.Event {
+		t.Helper()
+		// A marker waits for the worker to finish all notifications from the cycle.
+		d.notifications <- notify.Event{State: "test barrier"}
+		var events []notify.Event
+		for {
+			select {
+			case event := <-sent:
+				if event.State == "test barrier" {
+					return events
+				}
+				events = append(events, event)
+			case <-time.After(time.Second):
+				t.Fatal("notification worker did not finish the cycle")
+			}
+		}
+	}
+}
+
+func TestNtfyMemoryHogAlertsOnceAndRecovers(t *testing.T) {
+	host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host, loadExample(t)}, src, nil, nil, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := captureNotifications(t, d)
+	snap := running(2)
+	snap.Host = sysprobe.Host{MemoryPressureKnown: true, MemoryPressure: "warn"}
+	snap.Processes[0].MemoryKnown = true
+	snap.Processes[0].MemoryBytes = 1 << 30
+	src.Set(snap)
+	cycle := func() []ServiceStatus {
+		t.Helper()
+		rows, err := d.Cycle(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("memory pressure notified before the sustained threshold")
+	}
+	now = now.Add(6 * time.Minute)
+	rows := cycle()
+	if rows[0].Status != rules.StatusWatch || len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindMemoryHog {
+		t.Fatalf("expected a memory_hog alert while host is watch: %+v", rows[0])
+	}
+	if events := sent(); len(events) != 1 || events[0].Message != rows[0].Alerts[0].Message {
+		t.Fatalf("memory_hog should send exactly one notification, got %d", len(events))
+	}
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("persistent memory_hog repeated its notification")
+	}
+	// Neither missing pressure readings nor a hold confirms recovery.
+	snap.Host.MemoryPressureKnown = false
+	src.Set(snap)
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("unknown memory pressure caused a false all-clear")
+	}
+	snap.Host.MemoryPressureKnown = true
+	snap.Host.SleepKnown, snap.Host.Asleep = true, true
+	snap.Host.MemoryPressure = "normal"
+	src.Set(snap)
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("held resource checks caused a false all-clear")
+	}
+	snap.Host.Asleep = false
+	snap.Host.MemoryPressure = "warn"
+	// A new largest process is still the same continuous pressure incident.
+	snap.Processes = append(snap.Processes, sysprobe.Process{PID: 9, Name: "OtherTool", MemoryKnown: true, MemoryBytes: 2 << 30})
+	src.Set(snap)
+	cycle()
+	now = now.Add(6 * time.Minute)
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("changing the largest process repeated the pressure notification")
+	}
+	snap.Host.MemoryPressure = "normal"
+	src.Set(snap)
+	cycle()
+	if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != "Memory pressure is back below the alert level." {
+		t.Fatalf("expected one memory all-clear, got %+v", events)
+	}
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatal("memory all-clear repeated")
+	}
+}
+
+func TestNtfyMemoryHogQueuesDespiteLogFailure(t *testing.T) {
+	host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	book, err := logbook.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { book.Close() })
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host, loadExample(t)}, src, nil, book, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := captureNotifications(t, d)
+	snap := running(2)
+	snap.Host = sysprobe.Host{MemoryPressureKnown: true, MemoryPressure: "warn"}
+	snap.Processes[0].MemoryKnown = true
+	snap.Processes[0].MemoryBytes = 1 << 30
+	src.Set(snap)
+	if _, err := d.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if events := sent(); len(events) != 0 {
+		t.Fatal("memory pressure notified before the sustained threshold")
+	}
+	// The one-shot memory alert must survive a failure to append it to the log.
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := d.Cycle(context.Background()); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("expected a closed-log failure, got %v", err)
+	}
+	want := "Example Desktop App is the largest memory user, and memory pressure has stayed at warning for 6 minutes."
+	if events := sent(); len(events) != 1 || events[0].State != "alert" || events[0].Message != want {
+		t.Fatalf("expected the machine alert despite the log failure, got %+v", events)
+	}
+	book, err = logbook.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Log = book
+	rows, err := d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows[0].Alerts) != 0 {
+		t.Fatal("machine rule repeated its one-shot alert")
+	}
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("persistent incident notified again after logging recovered: %+v", events)
+	}
+}
+
+func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, want string
+		watched          bool
+		criticalMemory   bool
+	}{
+		{"watched CPU without fixes", rules.KindCPUHog, "CPU usage is back below the alert threshold.", true, false},
+		{"unwatched CPU", rules.KindCPUHog, "CPU usage is back below the alert threshold.", false, false},
+		{"unwatched memory", rules.KindMemoryHog, "Memory pressure is back below the alert level.", false, false},
+		{"critical memory recovers to warning", rules.KindMemoryHog, "Memory pressure is back below the alert level.", false, true},
+		{"low disk", rules.KindDiskLow, "Free disk space is back above the alert threshold.", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.criticalMemory {
+				for i := range host.Checks {
+					if host.Checks[i].Type == plugins.CheckMemory {
+						host.Checks[i].Level = "critical"
+					}
+				}
+			}
+			service := loadExample(t)
+			service.Fixes = nil
+			src := &sysprobe.MemSource{}
+			now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+			d, err := New([]plugins.Plugin{host, service}, src, nil, nil, nil, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			sent := captureNotifications(t, d)
+			snap := running(2)
+			snap.Host = sysprobe.Host{NetworkKnown: true, NetworkUp: true, DiskKnown: true, DiskFreePercent: 40, MemoryPressureKnown: true, MemoryPressure: "normal"}
+			index := 0
+			if !tc.watched {
+				snap.Processes = append(snap.Processes, sysprobe.Process{PID: 9, Name: "OtherTool"})
+				index = len(snap.Processes) - 1
+			}
+			cycle := func() []ServiceStatus {
+				t.Helper()
+				src.Set(snap)
+				rows, err := d.Cycle(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rows
+			}
+			cycle()
+			if events := sent(); len(events) != 0 {
+				t.Fatal("initial health sent a notification")
+			}
+			for range 2 { // A second incident can alert again after recovery.
+				switch tc.kind {
+				case rules.KindCPUHog:
+					snap.Processes[index].CPUKnown = true
+					snap.Processes[index].CPUPercent = 95
+				case rules.KindMemoryHog:
+					snap.Host.MemoryPressure = "critical"
+					snap.Processes[index].MemoryKnown = true
+					snap.Processes[index].MemoryBytes = 1 << 30
+				case rules.KindDiskLow:
+					snap.Host.DiskFreePercent = 9
+				}
+				rows := cycle()
+				if tc.kind == rules.KindCPUHog || tc.kind == rules.KindMemoryHog {
+					if events := sent(); len(events) != 0 {
+						t.Fatal("resource incident notified before its threshold")
+					}
+					now = now.Add(6 * time.Minute)
+					rows = cycle()
+				}
+				if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != tc.kind {
+					t.Fatalf("expected machine alert: %+v", rows[0])
+				}
+				if events := sent(); len(events) != 1 || events[0].Message != rows[0].Alerts[0].Message {
+					t.Fatalf("expected one human alert message, got %+v", events)
+				}
+				cycle()
+				if events := sent(); len(events) != 0 {
+					t.Fatal("persistent machine incident repeated")
+				}
+				known := snap
+				unknown := snap
+				unknown.Host = sysprobe.Host{}
+				unknown.Processes = append([]sysprobe.Process(nil), snap.Processes...)
+				unknown.Processes[index].CPUKnown = false
+				snap = unknown
+				cycle()
+				if events := sent(); len(events) != 0 {
+					t.Fatal("unknown reading caused a false recovery")
+				}
+				snap = known
+				snap.Processes[index].CPUPercent = 0
+				snap.Host.MemoryPressure = "normal"
+				if tc.criticalMemory {
+					snap.Host.MemoryPressure = "warn"
+				}
+				snap.Host.DiskFreePercent = 40
+				snap.Host.NetworkUp = true
+				cycle()
+				if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != tc.want {
+					t.Fatalf("expected one machine all-clear, got %+v", events)
+				}
+				cycle()
+				if events := sent(); len(events) != 0 {
+					t.Fatal("machine all-clear repeated")
+				}
+			}
+		})
+	}
+}
+
+func TestNtfyNetworkOutageNotifiesOnlyAfterRecovery(t *testing.T) {
+	host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host}, src, nil, nil, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := captureNotifications(t, d)
+	snap := running(2)
+	snap.Processes[0].CPUKnown = true
+	snap.Host = sysprobe.Host{
+		SleepKnown: true, NetworkKnown: true, NetworkUp: true,
+		DiskKnown: true, DiskFreePercent: 40,
+		MemoryPressureKnown: true, MemoryPressure: "normal",
+	}
+	cycle := func() []ServiceStatus {
+		t.Helper()
+		src.Set(snap)
+		rows, err := d.Cycle(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("initial network health sent a notification: %+v", events)
+	}
+	for range 2 {
+		lostAt := now
+		snap.Host.NetworkUp = false
+		rows := cycle()
+		if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindNetworkDown {
+			t.Fatalf("expected network_down rule alert, got %+v", rows[0])
+		}
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("attempted a phone notification without a network route: %+v", events)
+		}
+		now = now.Add(2 * time.Minute)
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("repeated outage attempted a phone notification: %+v", events)
+		}
+		snap.Host.NetworkKnown = false
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("unknown network reading sent a recovery: %+v", events)
+		}
+		// Network-back is deferred while the machine is asleep.
+		snap.Host.NetworkKnown, snap.Host.NetworkUp, snap.Host.Asleep = true, true, true
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("recovery sent before network_back: %+v", events)
+		}
+		now = now.Add(4 * time.Minute)
+		snap.Host.Asleep = false
+		rows = cycle()
+		var back rules.Alert
+		for _, alert := range rows[0].Alerts {
+			if alert.Kind == rules.KindNetworkBack {
+				back = alert
+			}
+		}
+		if back.Message == "" {
+			t.Fatal("missing network_back rule alert")
+		}
+		want := "Network connection was lost at " + lostAt.UTC().Format("15:04 UTC on 2 Jan 2006") + " and is now back. " + back.Message
+		if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != want {
+			t.Fatalf("expected one outage-and-recovery notification, got %+v", events)
+		}
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("network recovery repeated: %+v", events)
+		}
+		now = now.Add(time.Hour)
+	}
+}
+
+func TestNtfyNetworkRecoveryWithoutOutageTime(t *testing.T) {
+	d, _, _, _ := offerDoctor(t)
+	sent := captureNotifications(t, d)
+	back := rules.MachineVerdict{Alerts: []rules.Alert{{Kind: rules.KindNetworkBack, Message: "The network is back."}}}
+	d.queueMachineNotifications(back)
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("unmatched network_back sent a confusing all-clear: %+v", events)
+	}
+	d.queueMachineNotifications(rules.MachineVerdict{Alerts: []rules.Alert{{Kind: rules.KindNetworkDown}}})
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("network_down attempted delivery: %+v", events)
+	}
+	d.queueMachineNotifications(back)
+	want := "Network connection was lost and is now back. The network is back."
+	if events := sent(); len(events) != 1 || events[0].Message != want {
+		t.Fatalf("expected outage context without a fabricated timestamp, got %+v", events)
+	}
+}
+
+func TestNtfySimultaneousMachineConditionsClearSeparately(t *testing.T) {
+	d, _, _, _ := offerDoctor(t)
+	sent := captureNotifications(t, d)
+	d.queueMachineNotifications(rules.MachineVerdict{Alerts: []rules.Alert{
+		{Kind: rules.KindMemoryHog + "_unwatched", Message: "Memory warning."},
+		{Kind: rules.KindCPUHog + "_unwatched", Message: "CPU warning."},
+	}})
+	if events := sent(); len(events) != 2 {
+		t.Fatalf("expected independent CPU and memory alerts, got %+v", events)
+	}
+	d.queueMachineNotifications(rules.MachineVerdict{Normal: []string{rules.KindCPUHog}})
+	if events := sent(); len(events) != 1 || events[0].Message != "CPU usage is back below the alert threshold." {
+		t.Fatalf("expected only CPU recovery, got %+v", events)
+	}
+	d.queueMachineNotifications(rules.MachineVerdict{Normal: []string{rules.KindCPUHog, rules.KindMemoryHog}})
+	if events := sent(); len(events) != 1 || events[0].Message != "Memory pressure is back below the alert level." {
+		t.Fatalf("expected only memory recovery, got %+v", events)
+	}
+	d.UseNotifier(nil)
+	d.queueMachineNotifications(rules.MachineVerdict{Alerts: []rules.Alert{{Kind: rules.KindDiskLow, Message: "Disk warning."}}})
+	if len(queuedStates(d)) != 0 {
+		t.Fatal("disabled notifier queued a machine alert")
 	}
 }
 

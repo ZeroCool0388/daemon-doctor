@@ -22,6 +22,9 @@ type Sample struct {
 type MachineVerdict struct {
 	Hold   bool
 	Alerts []Alert
+	// Normal lists machine conditions with a confirmed healthy reading.
+	// Unknown readings and held resource checks never clear an incident.
+	Normal []string
 }
 
 // HostHold reports whether service alerts should pause.
@@ -63,11 +66,24 @@ func (e *Engine) DecideMachine(now time.Time, snap sysprobe.Snapshot, samples []
 		return MachineVerdict{Hold: true, Alerts: alerts}
 	}
 
-	alerts = append(alerts, st.observeDisk(host, h, now)...)
-	alerts = append(alerts, st.observeCPU(host, snap, samples, now)...)
-	alerts = append(alerts, st.observeMemory(host, snap, samples, now)...)
+	verdict := MachineVerdict{Alerts: alerts}
+	disk, diskNormal := st.observeDisk(host, h, now)
+	cpu, cpuNormal := st.observeCPU(host, snap, samples, now)
+	mem, memNormal := st.observeMemory(host, snap, samples, now)
+	verdict.Alerts = append(verdict.Alerts, disk...)
+	verdict.Alerts = append(verdict.Alerts, cpu...)
+	verdict.Alerts = append(verdict.Alerts, mem...)
+	if diskNormal {
+		verdict.Normal = append(verdict.Normal, KindDiskLow)
+	}
+	if cpuNormal {
+		verdict.Normal = append(verdict.Normal, KindCPUHog)
+	}
+	if memNormal {
+		verdict.Normal = append(verdict.Normal, KindMemoryHog)
+	}
 	st.syncStop()
-	return MachineVerdict{Alerts: alerts}
+	return verdict
 }
 
 // StopAllowed reports whether name is the process a current unwatched hog alert named.
@@ -179,30 +195,30 @@ func (st *machineState) observeNetwork(host plugins.Plugin, h sysprobe.Host, now
 	return nil
 }
 
-func (st *machineState) observeDisk(host plugins.Plugin, h sysprobe.Host, now time.Time) []Alert {
+func (st *machineState) observeDisk(host plugins.Plugin, h sysprobe.Host, now time.Time) ([]Alert, bool) {
 	spec, ok := checkByType(host, plugins.CheckDisk)
 	if !ok || !h.DiskKnown {
-		return nil
+		return nil, false
 	}
 	if h.DiskFreePercent < spec.MinFreePercent {
 		if st.diskActive {
-			return nil
+			return nil, false
 		}
 		st.diskActive = true
-		return []Alert{hostAlert(host, KindDiskLow, map[string]string{"free": formatPercent(h.DiskFreePercent)}, now)}
+		return []Alert{hostAlert(host, KindDiskLow, map[string]string{"free": formatPercent(h.DiskFreePercent)}, now)}, false
 	}
 	st.diskActive = false
-	return nil
+	return nil, true
 }
 
-func (st *machineState) observeCPU(host plugins.Plugin, snap sysprobe.Snapshot, samples []Sample, now time.Time) []Alert {
+func (st *machineState) observeCPU(host plugins.Plugin, snap sysprobe.Snapshot, samples []Sample, now time.Time) ([]Alert, bool) {
 	spec, ok := checkByType(host, plugins.CheckCPU)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	dur, ok := positiveDuration(spec.Duration)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	line := spec.CPUPercent
 	if line <= 0 {
@@ -211,20 +227,20 @@ func (st *machineState) observeCPU(host plugins.Plugin, snap sysprobe.Snapshot, 
 	top, found := sysprobe.TopCPU(snap)
 	if !found || top.CPUPercent < line {
 		st.cpu = hogWatch{}
-		return nil
+		return nil, found
 	}
 	return st.sustain(&st.cpu, top, samples, host, now, dur, KindCPUHog, map[string]string{
 		"percent": formatPercent(top.CPUPercent),
-	})
+	}), false
 }
 
-func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapshot, samples []Sample, now time.Time) []Alert {
+func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapshot, samples []Sample, now time.Time) ([]Alert, bool) {
 	spec, ok := checkByType(host, plugins.CheckMemory)
 	if !ok || !snap.Host.MemoryPressureKnown {
 		if ok && !snap.Host.MemoryPressureKnown {
 			st.mem = hogWatch{}
 		}
-		return nil
+		return nil, false
 	}
 	want := spec.Level
 	if want == "" {
@@ -232,20 +248,20 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 	}
 	if pressureRank(snap.Host.MemoryPressure) < pressureRank(want) || pressureRank(want) < 1 {
 		st.mem = hogWatch{}
-		return nil
+		return nil, pressureRank(snap.Host.MemoryPressure) >= 0 && pressureRank(want) >= 1
 	}
 	dur, ok := positiveDuration(spec.Duration)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	top, found := sysprobe.TopMemory(snap)
 	if !found {
 		st.mem = hogWatch{}
-		return nil
+		return nil, false
 	}
 	return st.sustain(&st.mem, top, samples, host, now, dur, KindMemoryHog, map[string]string{
 		"level": pressureWord(snap.Host.MemoryPressure),
-	})
+	}), false
 }
 
 func (st *machineState) sustain(w *hogWatch, top sysprobe.Process, samples []Sample, host plugins.Plugin, now time.Time, dur time.Duration, kind string, extra map[string]string) []Alert {

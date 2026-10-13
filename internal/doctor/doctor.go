@@ -55,6 +55,7 @@ type Doctor struct {
 	notifier      notify.Sender
 	notifications chan notify.Event
 	notifyStates  map[string]string
+	notifyMachine map[string]rules.Alert
 }
 
 type outgoing struct {
@@ -169,6 +170,8 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 		samples = append(samples, rules.Sample{Plugin: row.plugin, Outcomes: row.outcomes})
 	}
 	machine := d.Rules.DecideMachine(d.now(), snap, samples)
+	// Queue one-shot transitions before logging or offer persistence can fail.
+	d.queueMachineNotifications(machine)
 	d.held = machine.Hold
 
 	out := make([]ServiceStatus, 0, len(rows))
