@@ -180,6 +180,7 @@ func takeDarwin(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	procs = attachExePaths(ctx, procs)
+	procs = attachStartTimes(ctx, procs)
 	lsofCmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-F", "pn")
 	lsofOut, err := lsofCmd.Output()
 	if err != nil {

@@ -100,22 +100,28 @@ func (r *Runner) applyRelaunch(ctx context.Context, p plugins.Plugin, fix plugin
 			roots = append(roots, pid)
 		}
 		killPIDs := sysprobe.SignalOrder(last, roots)
+		candidates := processIdentities(last, killPIDs)
 		for _, pid := range killPIDs {
 			if refused(pid) {
 				return r.finishRelaunch(ctx, p, res, start, fmt.Errorf("refusing to signal pid %d", pid))
 			}
+			candidate := candidates[pid]
+			if old, tracked := original[pid]; candidate.StartTime == 0 || (tracked && !sameProcess(old, candidate)) {
+				return r.finishRelaunch(ctx, p, res, start, fmt.Errorf("cannot verify original lifetime of pid %d; relaunch stopped", pid))
+			}
+			// New descendants may be enrolled; an existing identity is never
+			// replaced by a different lifetime occupying the same PID.
+			if _, tracked := original[pid]; !tracked {
+				original[pid] = candidate
+			}
 		}
 		res.Signal = "KILL"
 		res.Detail += fmt.Sprintf("; quit timeout, KILL to pids %v", killPIDs)
-		if err = r.signal(ctx, &res, killPIDs, syscall.SIGKILL, "", nil, false); err != nil {
+		if err = r.killOriginal(ctx, &res, killPIDs, original); err != nil {
 			return r.finishRelaunch(ctx, p, res, start, err)
 		}
 		if res.SignalError != "" {
 			return r.finishRelaunch(ctx, p, res, start, fmt.Errorf("kill failed: %s", res.SignalError))
-		}
-		// Track children discovered since the first sample as well.
-		for pid, proc := range processIdentities(last, killPIDs) {
-			original[pid] = proc
 		}
 		killCtx, killCancel := context.WithTimeout(ctx, relaunchKillWait)
 		_, stopped, err = r.waitStopped(killCtx, p, original)
@@ -172,7 +178,9 @@ func (r *Runner) waitStopped(ctx context.Context, p plugins.Plugin, original map
 			roots = append(roots, pid)
 		}
 		for pid, proc := range processIdentities(snap, sysprobe.SignalOrder(snap, roots)) {
-			original[pid] = proc
+			if _, tracked := original[pid]; !tracked {
+				original[pid] = proc
+			}
 		}
 		if len(sysprobe.RootPIDsSpec(snap, p.Process.Spec())) == 0 && len(survivingOriginal(snap, original)) == 0 {
 			return last, true, nil
@@ -228,11 +236,41 @@ func survivingOriginal(snap sysprobe.Snapshot, original map[int]sysprobe.Process
 	out := map[int]sysprobe.Process{}
 	for _, proc := range snap.Processes {
 		old, ok := original[proc.PID]
-		if ok && proc.Name == old.Name && proc.Exe == old.Exe && proc.Cmd == old.Cmd {
+		if ok && sameProcess(old, proc) {
 			out[proc.PID] = proc
 		}
 	}
 	return out
+}
+
+func sameProcess(old, current sysprobe.Process) bool {
+	return old.StartTime != 0 && old.StartTime == current.StartTime &&
+		old.Name == current.Name && old.Exe == current.Exe && old.Cmd == current.Cmd
+}
+
+// Re-sample before each signal: the PID can be reused after the timeout sample
+// or while an earlier child in the kill order is being stopped.
+func (r *Runner) killOriginal(ctx context.Context, res *Result, pids []int, original map[int]sysprobe.Process) error {
+	for _, pid := range pids {
+		snap, err := r.take(ctx)
+		if err != nil {
+			return err
+		}
+		current, exists := processIdentities(snap, []int{pid})[pid]
+		if !exists {
+			continue // exited before its turn
+		}
+		if !sameProcess(original[pid], current) {
+			return fmt.Errorf("process lifetime changed for pid %d; KILL refused", pid)
+		}
+		if err := r.signal(ctx, res, []int{pid}, syscall.SIGKILL, "", nil, false); err != nil {
+			return err
+		}
+		if res.SignalError != "" {
+			return fmt.Errorf("kill failed: %s", res.SignalError)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) finishRelaunch(ctx context.Context, p plugins.Plugin, res Result, start time.Time, applyErr error) (Result, error) {

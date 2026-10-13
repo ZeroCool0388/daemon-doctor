@@ -56,6 +56,9 @@ func relaunchPlugin() plugins.Plugin {
 
 func flaggedTree(healthy bool) sysprobe.Snapshot {
 	snap := tree()
+	for i := range snap.Processes {
+		snap.Processes[i].StartTime = uint64(1000 + i)
+	}
 	snap.Processes[0].Cmd = "example-desktop-app"
 	if healthy {
 		snap.Processes[0].Cmd += " --required"
@@ -170,10 +173,11 @@ func TestRelaunchWaitsForOrphanedChildren(t *testing.T) {
 func TestRelaunchTracksChildrenCreatedDuringQuit(t *testing.T) {
 	initial := flaggedTree(false)
 	withChild := flaggedTree(false)
-	child := sysprobe.Process{PID: 7, PPID: 4, Name: "new-helper", Exe: "new-helper"}
+	child := sysprobe.Process{PID: 7, PPID: 4, Name: "new-helper", Exe: "new-helper", StartTime: 2000}
 	withChild.Processes = append(withChild.Processes, child)
 	child.PPID = 1
-	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{initial, withChild, {Processes: []sysprobe.Process{child}}, {}, flaggedTree(true), flaggedTree(true)}}
+	orphan := sysprobe.Snapshot{Processes: []sysprobe.Process{child}}
+	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{initial, withChild, orphan, orphan, {}, flaggedTree(true), flaggedTree(true)}}
 	ctrl := &relaunchCtrl{}
 	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err != nil || !res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{7}) {
@@ -222,6 +226,72 @@ func TestRelaunchDoesNotKillReplacementProcess(t *testing.T) {
 	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err == nil || res.Fixed || len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
 		t.Fatalf("replacement process touched: %+v %v %+v", res, err, ctrl)
+	}
+}
+
+func TestRelaunchRefusesReusedPIDWithIdenticalCommand(t *testing.T) {
+	for _, scenario := range []string{"app", "child", "unavailable-start", "start-lost"} {
+		t.Run(scenario, func(t *testing.T) {
+			initial := flaggedTree(false)
+			if scenario == "unavailable-start" {
+				initial.Processes[0].StartTime = 0
+			}
+			src := &sysprobe.MemSource{}
+			src.Set(initial)
+			ctrl := &relaunchCtrl{quit: func(context.Context) error {
+				replacement := flaggedTree(false)
+				switch scenario {
+				case "app":
+					replacement.Processes[0].StartTime++
+				case "child":
+					replacement.Processes[1].StartTime++
+				case "start-lost":
+					replacement.Processes[0].StartTime = 0
+				}
+				// PID, PPID, Name, Exe and Cmd all remain unchanged.
+				src.Set(replacement)
+				return nil
+			}}
+			res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+			if err == nil || res.Fixed || len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
+				t.Fatalf("reused or unverified PID touched: %+v %v %+v", res, err, ctrl)
+			}
+		})
+	}
+}
+
+func TestRelaunchChecksLifetimeAgainBeforeEachKill(t *testing.T) {
+	src := &sysprobe.MemSource{}
+	src.Set(flaggedTree(false))
+	ctrl := &relaunchCtrl{signal: func(pid int) error {
+		if pid != 6 {
+			t.Fatalf("unexpected signal to pid %d", pid)
+		}
+		// The app PID is reused while its child is being stopped.
+		replacement := flaggedTree(false)
+		replacement.Processes = replacement.Processes[:1]
+		replacement.Processes[0].StartTime++
+		src.Set(replacement)
+		return nil
+	}}
+	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	if err == nil || res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{6}) || len(ctrl.launches) != 0 {
+		t.Fatalf("reused app PID killed: %+v %v %+v", res, err, ctrl)
+	}
+}
+
+func TestSurvivingOriginalRequiresKnownMatchingStartTime(t *testing.T) {
+	initial := flaggedTree(false)
+	original := processIdentities(initial, []int{4, 6})
+	replacement := flaggedTree(false)
+	replacement.Processes[0].StartTime++
+	alive := survivingOriginal(replacement, original)
+	if len(alive) != 1 || alive[6].StartTime != original[6].StartTime {
+		t.Fatalf("PID reuse classified as survival: %+v", alive)
+	}
+	replacement.Processes[1].StartTime = 0
+	if alive := survivingOriginal(replacement, original); len(alive) != 0 {
+		t.Fatalf("unknown lifetime classified as survival: %+v", alive)
 	}
 }
 
