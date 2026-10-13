@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
@@ -39,7 +38,7 @@ type Doctor struct {
 	Fixes   *fixes.Runner
 	Log     *logbook.Book
 
-	mu          sync.Mutex
+	mu          stateMutex
 	offers      *offers.Store
 	active      map[string]rules.Alert
 	latest      []ServiceStatus
@@ -112,7 +111,9 @@ func (d *Doctor) UseRelay(sec *security.Store, client *relay.Client) {
 // While the network is down or the Mac is asleep, service checks are skipped
 // so their streaks stay where they were, and no service alert is raised.
 func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
-	d.mu.Lock()
+	if err := d.mu.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer d.mu.Unlock()
 	return d.cycle(ctx)
 }

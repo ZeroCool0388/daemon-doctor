@@ -221,5 +221,5 @@ func (d *Doctor) RecordMCPRefusalContext(ctx context.Context, id, message string
 // No detached waiter goroutine: cancellation stops a queued backend call before
 // it can acquire the monitor lock and start reading or applying an offer.
 func (d *Doctor) lockContext(ctx context.Context) error {
-	return security.LockMutexContext(ctx, &d.mu)
+	return d.mu.LockContext(ctx)
 }
