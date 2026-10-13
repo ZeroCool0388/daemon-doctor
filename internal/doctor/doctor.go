@@ -55,6 +55,7 @@ type Doctor struct {
 	notifier      notify.Sender
 	notifications chan notify.Event
 	notifyStates  map[string]string
+	notifyMachine map[string]rules.Alert
 }
 
 type outgoing struct {
@@ -216,6 +217,7 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 			d.queueNotification(row)
 		}
 	}
+	d.queueMachineNotifications(machine)
 	d.latest = out
 	d.sampledAt = d.now()
 	d.pruneAlerts()

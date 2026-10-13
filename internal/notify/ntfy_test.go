@@ -115,3 +115,42 @@ func TestNtfyRejectsRedirectAndHonoursCancellation(t *testing.T) {
 		t.Fatal("delivery did not stop")
 	}
 }
+
+func TestNtfyMachineMessagesAndPrivacy(t *testing.T) {
+	topic := privateTopic(t)
+	n, err := New(Config{Enabled: true, Topic: topic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message string
+	n.HTTP.Transport = transportFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		message = string(body)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	})
+	for _, tc := range []struct {
+		state, raw, want string
+	}{
+		{"alert", "OpenClaw gateway is the largest memory user, and memory pressure has stayed at warning for 6 minutes.", "OpenClaw gateway is the largest memory user, and memory pressure has stayed at warning for 6 minutes."},
+		{"ok", "Memory pressure is back to normal.", "Memory pressure is back to normal."},
+		{"alert", "Private " + topic + "\n\x00alert.", "Private [private]  alert."},
+		{"ok", "token=abcdefgh12345678 is back to normal.", "token=[blanked] is back to normal."},
+		{"alert", strings.Repeat("é", 1100), strings.Repeat("é", 1024)},
+	} {
+		if err := n.Send(context.Background(), Event{State: tc.state, Message: tc.raw}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(message, topic) {
+			t.Fatal("machine notification disclosed topic")
+		}
+		if message != tc.want {
+			t.Fatal("incorrect machine notification text")
+		}
+	}
+	if err := n.Send(context.Background(), Event{State: "alert"}); err == nil {
+		t.Fatal("empty machine alert was accepted")
+	}
+	if err := n.Send(context.Background(), Event{State: "unsupported", Message: "Example"}); err == nil {
+		t.Fatal("custom message bypassed state validation")
+	}
+}

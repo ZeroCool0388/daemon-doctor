@@ -59,7 +59,7 @@ func GenerateTopic() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
-type Event struct{ ServiceName, State string }
+type Event struct{ ServiceName, State, Message string }
 type Sender interface {
 	Send(context.Context, Event) error
 }
@@ -81,17 +81,7 @@ func New(raw Config) (*Ntfy, error) {
 }
 
 func (n *Ntfy) Send(ctx context.Context, event Event) error {
-	name := logbook.Blank(strings.ReplaceAll(event.ServiceName, n.config.Topic, "[private]"))
-	name = strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, name))
-	chars := []rune(name)
-	if len(chars) > 80 {
-		name = string(chars[:80])
-	}
+	name := n.cleanText(event.ServiceName, 80)
 	if name == "" {
 		name = "A watched service"
 	}
@@ -103,8 +93,15 @@ func (n *Ntfy) Send(ctx context.Context, event Event) error {
 		message = name + " looks stuck. It is running but not responding as expected."
 	case "ok":
 		message = name + " has recovered and looks healthy."
+	case "alert":
+		if strings.TrimSpace(event.Message) == "" {
+			return errors.New("phone notification alert requires a message")
+		}
 	default:
 		return errors.New("unsupported phone notification state")
+	}
+	if event.Message != "" && (event.State == "alert" || event.State == "ok") {
+		message = n.cleanText(event.Message, 1024)
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, SendTimeout)
 	defer cancel()
@@ -131,4 +128,19 @@ func (n *Ntfy) Send(ctx context.Context, event Event) error {
 		return errors.New("ntfy delivery failed")
 	}
 	return nil
+}
+
+func (n *Ntfy) cleanText(raw string, limit int) string {
+	text := logbook.Blank(strings.ReplaceAll(raw, n.config.Topic, "[private]"))
+	text = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text))
+	chars := []rune(text)
+	if len(chars) > limit {
+		text = string(chars[:limit])
+	}
+	return text
 }
