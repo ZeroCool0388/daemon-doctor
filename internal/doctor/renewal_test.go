@@ -16,15 +16,19 @@ func TestExpiredOfferRenewsWithoutRepeatingLiveOfferOrCountingIncident(t *testin
 	previous := first[0]
 	for round := 0; round < 5; round++ {
 		*now = previous.ExpiresAt.Add(-time.Nanosecond)
-		if _, err := d.Cycle(context.Background()); err != nil {
+		rows, err := d.Cycle(context.Background())
+		if err != nil {
 			t.Fatal(err)
+		}
+		if len(rows[0].Alerts) != 0 {
+			t.Fatalf("live offer repeated incident alert: %+v", rows)
 		}
 		live, _ := d.OfferedFixes()
 		if len(live) != 1 || live[0].ID != previous.ID {
 			t.Fatalf("live offer duplicated: %+v", live)
 		}
 		*now = previous.ExpiresAt
-		rows, err := d.Cycle(context.Background())
+		rows, err = d.Cycle(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -32,13 +36,33 @@ func TestExpiredOfferRenewsWithoutRepeatingLiveOfferOrCountingIncident(t *testin
 		if len(live) != 1 || live[0].ID == previous.ID || live[0].AlertID == previous.AlertID || !live[0].ExpiresAt.Equal(now.Add(security.ApprovalTTL)) {
 			t.Fatalf("renewal: %+v", live)
 		}
-		if len(rows[0].Alerts) != 1 || !rows[0].Alerts[0].OfferFix {
-			t.Fatalf("renewal advanced failure lockout: %+v", rows)
+		if len(rows[0].Alerts) != 0 {
+			t.Fatalf("renewal repeated incident alert: %+v", rows)
+		}
+		snapshot, _, err := d.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot[0].Alerts) != 1 || !snapshot[0].Alerts[0].OfferFix || snapshot[0].Alerts[0].ID != live[0].AlertID || !snapshot[0].Alerts[0].At.Equal(*now) {
+			t.Fatalf("renewal missing from active snapshot: %+v", snapshot)
 		}
 		if _, err := d.ApplyOffer(context.Background(), previous.ID, "", false); err == nil {
 			t.Fatal("expired offer executed")
 		}
 		previous = live[0]
+	}
+	events, err := d.RecentEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alertCount := 0
+	for _, event := range events {
+		if event.Kind == "alert" {
+			alertCount++
+		}
+	}
+	if alertCount != 1 {
+		t.Fatalf("renewal logged duplicate incident alerts: %d", alertCount)
 	}
 	if ctrl.signals != 0 {
 		t.Fatal("renewal executed a fix")

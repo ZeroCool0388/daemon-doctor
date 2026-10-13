@@ -242,15 +242,15 @@ func (d *Doctor) FixResultContext(ctx context.Context, id string) (*offers.FixRe
 }
 
 // Renew only expired capabilities for an active incident, without advancing
-// failure counts or reviving consumed, held or withdrawn incidents.
-func (d *Doctor) renewExpiredOffers(ctx context.Context) ([]rules.Alert, error) {
+// failure counts or reviving consumed, held or withdrawn incidents. Renewal
+// updates the active snapshot and offers without emitting a new incident alert.
+func (d *Doctor) renewExpiredOffers(ctx context.Context) error {
 	var expired []rules.Alert
 	for _, alert := range d.active {
 		if !d.held && alert.OfferFix && d.Rules.AlertActive(alert) && !d.now().Before(alert.At.Add(security.ApprovalTTL)) {
 			expired = append(expired, alert)
 		}
 	}
-	var renewed []rules.Alert
 	for _, old := range expired {
 		next := old
 		next.ID, next.At = security.NewID(), d.now()
@@ -271,15 +271,11 @@ func (d *Doctor) renewExpiredOffers(ctx context.Context) ([]rules.Alert, error) 
 			next.Action = next.Actions[0]
 		}
 		if err := d.noteAlert(ctx, next); err != nil {
-			return nil, err
+			return err
 		}
 		delete(d.active, old.ID)
-		if err := d.logAlert(next); err != nil {
-			return nil, err
-		}
-		renewed = append(renewed, next)
 	}
-	return renewed, nil
+	return nil
 }
 
 func (d *Doctor) RecordMCPRefusal(id, message string) {
