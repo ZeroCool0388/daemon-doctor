@@ -70,6 +70,7 @@ type FileStamp struct {
 }
 
 // ServiceHint names a system launchd service and its TCP listening port.
+// The label and port together identify a service reading in Snapshot.Services.
 type ServiceHint struct {
 	Label string
 	Port  int
@@ -104,7 +105,7 @@ type Snapshot struct {
 	Host          Host
 	Launchd       map[string]LaunchdJob
 	Files         map[string]FileStamp
-	Services      map[string]ServiceState
+	Services      map[ServiceHint]ServiceState
 }
 
 // Source takes a sample. Live system calls sit behind this interface.
@@ -180,7 +181,7 @@ func clone(s Snapshot) Snapshot {
 		Host:          s.Host,
 		Launchd:       make(map[string]LaunchdJob, len(s.Launchd)),
 		Files:         make(map[string]FileStamp, len(s.Files)),
-		Services:      make(map[string]ServiceState, len(s.Services)),
+		Services:      make(map[ServiceHint]ServiceState, len(s.Services)),
 	}
 	for pid, ports := range s.OutboundPorts {
 		out.OutboundPorts[pid] = append([]int(nil), ports...)
@@ -191,8 +192,8 @@ func clone(s Snapshot) Snapshot {
 	for path, stamp := range s.Files {
 		out.Files[path] = stamp
 	}
-	for label, state := range s.Services {
-		out.Services[label] = state
+	for hint, state := range s.Services {
+		out.Services[hint] = state
 	}
 	if len(s.Launchd) == 0 {
 		out.Launchd = nil

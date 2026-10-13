@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-func readSystemServices(ctx context.Context, hints []ServiceHint) map[string]ServiceState {
-	out := make(map[string]ServiceState, len(hints))
+func readSystemServices(ctx context.Context, hints []ServiceHint) map[ServiceHint]ServiceState {
+	out := make(map[ServiceHint]ServiceState, len(hints))
 	for _, hint := range hints {
 		loaded, loadKnown := systemServiceLoaded(ctx, hint.Label)
 		state := ServiceState{Loaded: loaded, Known: loaded}
@@ -19,7 +19,7 @@ func readSystemServices(ctx context.Context, hints []ServiceHint) map[string]Ser
 			state.Listening = listening
 			state.Known = listening || (loadKnown && listenKnown)
 		}
-		out[hint.Label] = state
+		out[hint] = state
 	}
 	return out
 }

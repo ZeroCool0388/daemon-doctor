@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
+	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
 )
 
 // launchdServiceCheck watches a system service that may start on demand.
@@ -14,7 +15,7 @@ func (launchdServiceCheck) Type() string { return plugins.CheckLaunchdService }
 func (launchdServiceCheck) Cost() int    { return plugins.BuiltinCosts()[plugins.CheckLaunchdService] }
 
 func (launchdServiceCheck) Run(in Input) Outcome {
-	state := in.Snap.Services[in.Spec.Label]
+	state := in.Snap.Services[sysprobe.ServiceHint{Label: in.Spec.Label, Port: in.Spec.Port}]
 	out := Outcome{Type: plugins.CheckLaunchdService}
 	switch {
 	case state.Loaded:

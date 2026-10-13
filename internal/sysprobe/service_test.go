@@ -39,10 +39,30 @@ func TestReadSystemServices(t *testing.T) {
 			}
 			t.Setenv("PATH", dir)
 			got := readSystemServices(context.Background(), []ServiceHint{{Label: "com.apple.screensharing", Port: 5900}})
-			if got["com.apple.screensharing"] != tc.want {
+			if got[ServiceHint{Label: "com.apple.screensharing", Port: 5900}] != tc.want {
 				t.Fatalf("state %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReadSystemServicesKeepsDifferentPortsForTheSameLabel(t *testing.T) {
+	dir := t.TempDir()
+	writeProbeCommand(t, dir, "launchctl", "printf 'Could not find service com.example.shared in domain for system\n' >&2\nexit 113\n")
+	writeProbeCommand(t, dir, "lsof", `case "$*" in
+  '-nP -a -iTCP:5900 -sTCP:LISTEN -F n') printf 'n*:5900\n' ;;
+  '-nP -a -iTCP:5901 -sTCP:LISTEN -F n') exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	t.Setenv("PATH", dir)
+	listening := ServiceHint{Label: "com.example.shared", Port: 5900}
+	closed := ServiceHint{Label: "com.example.shared", Port: 5901}
+	for _, hints := range [][]ServiceHint{{listening, closed}, {closed, listening}} {
+		got := readSystemServices(context.Background(), hints)
+		if len(got) != 2 || got[listening] != (ServiceState{Listening: true, Known: true}) || got[closed] != (ServiceState{Known: true}) {
+			t.Fatalf("hints %+v: readings overwritten or mixed: %+v", hints, got)
+		}
 	}
 }
 
@@ -57,19 +77,20 @@ func TestCancelledServiceProbeIsUnknown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got := readSystemServices(ctx, []ServiceHint{{Label: "com.apple.screensharing", Port: 5900}})
-	if got["com.apple.screensharing"] != (ServiceState{}) {
+	if got[ServiceHint{Label: "com.apple.screensharing", Port: 5900}] != (ServiceState{}) {
 		t.Fatalf("cancelled probe: %+v", got)
 	}
 }
 
 func TestServiceSnapshotsAreCopied(t *testing.T) {
-	source := &MemSource{Current: Snapshot{Services: map[string]ServiceState{"example": {Loaded: true, Known: true}}}}
+	hint := ServiceHint{Label: "example", Port: 5900}
+	source := &MemSource{Current: Snapshot{Services: map[ServiceHint]ServiceState{hint: {Loaded: true, Known: true}}}}
 	snap, err := source.Take(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap.Services["example"] = ServiceState{}
-	if !source.Current.Services["example"].Loaded {
+	snap.Services[hint] = ServiceState{}
+	if !source.Current.Services[hint].Loaded {
 		t.Fatal("editing a snapshot changed the source")
 	}
 }

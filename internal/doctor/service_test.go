@@ -42,7 +42,7 @@ func TestScreenSharingIdleFailureAndRecovery(t *testing.T) {
 		{name: "idle recovery", state: sysprobe.ServiceState{Loaded: true, Known: true}, status: rules.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			src.Set(sysprobe.Snapshot{Services: map[string]sysprobe.ServiceState{"com.apple.screensharing": tc.state}})
+			src.Set(sysprobe.Snapshot{Services: map[sysprobe.ServiceHint]sysprobe.ServiceState{{Label: "com.apple.screensharing", Port: 5900}: tc.state}})
 			rows, err := d.Cycle(context.Background())
 			if err != nil {
 				t.Fatal(err)
