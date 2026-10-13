@@ -85,6 +85,10 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 	}
 	runner := checks.NewRunner(reg)
 	runner.Now = now
+	// CLI fixes can sample and recheck before the first monitoring cycle.
+	if hinted, ok := src.(sysprobe.Hinted); ok {
+		hinted.SetHints(hintsFor(list))
+	}
 	return &Doctor{
 		Plugins:    list,
 		Source:     src,
@@ -224,6 +228,8 @@ func hintsFor(list []plugins.Plugin) sysprobe.ProbeHints {
 	for _, p := range list {
 		for _, check := range p.Checks {
 			switch check.Type {
+			case plugins.CheckLaunchdService:
+				hints.Services = append(hints.Services, sysprobe.ServiceHint{Label: check.Label, Port: check.Port})
 			case plugins.CheckLaunchdJob:
 				if check.Label != "" {
 					hints.Labels = append(hints.Labels, check.Label)

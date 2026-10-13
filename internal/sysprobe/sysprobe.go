@@ -69,10 +69,27 @@ type FileStamp struct {
 	Missing bool
 }
 
-// ProbeHints names the launchd labels and files a sample should fill in.
+// ServiceHint names a system launchd service and its TCP listening port.
+// The label and port together identify a service reading in Snapshot.Services.
+type ServiceHint struct {
+	Label string
+	Port  int
+}
+
+// ServiceState describes availability independently of an active process.
+// Known means the service was loaded, the port was listening, or both probes
+// completed and found neither. Failed probes do not establish unavailability.
+type ServiceState struct {
+	Loaded    bool
+	Listening bool
+	Known     bool
+}
+
+// ProbeHints names the launchd labels, services and files a sample should fill in.
 type ProbeHints struct {
-	Labels []string
-	Files  []string
+	Labels   []string
+	Files    []string
+	Services []ServiceHint
 }
 
 // Hinted is a Source that can be told which labels and files to read.
@@ -88,6 +105,7 @@ type Snapshot struct {
 	Host          Host
 	Launchd       map[string]LaunchdJob
 	Files         map[string]FileStamp
+	Services      map[ServiceHint]ServiceState
 }
 
 // Source takes a sample. Live system calls sit behind this interface.
@@ -163,6 +181,7 @@ func clone(s Snapshot) Snapshot {
 		Host:          s.Host,
 		Launchd:       make(map[string]LaunchdJob, len(s.Launchd)),
 		Files:         make(map[string]FileStamp, len(s.Files)),
+		Services:      make(map[ServiceHint]ServiceState, len(s.Services)),
 	}
 	for pid, ports := range s.OutboundPorts {
 		out.OutboundPorts[pid] = append([]int(nil), ports...)
@@ -173,11 +192,17 @@ func clone(s Snapshot) Snapshot {
 	for path, stamp := range s.Files {
 		out.Files[path] = stamp
 	}
+	for hint, state := range s.Services {
+		out.Services[hint] = state
+	}
 	if len(s.Launchd) == 0 {
 		out.Launchd = nil
 	}
 	if len(s.Files) == 0 {
 		out.Files = nil
+	}
+	if len(s.Services) == 0 {
+		out.Services = nil
 	}
 	return out
 }

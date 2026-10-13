@@ -23,7 +23,7 @@ type liveSource struct {
 	hints ProbeHints
 }
 
-// SetHints records the launchd labels and file paths the next sample should read.
+// SetHints records the launchd jobs, services and files the next sample should read.
 func (s *liveSource) SetHints(h ProbeHints) {
 	s.mu.Lock()
 	s.hints = h
@@ -223,6 +223,9 @@ func (s *liveSource) fillHints(ctx context.Context, snap *Snapshot) {
 	}
 	if runtime.GOOS == "darwin" && len(hints.Labels) > 0 {
 		snap.Launchd = readLaunchdJobs(ctx, hints.Labels)
+	}
+	if runtime.GOOS == "darwin" && len(hints.Services) > 0 {
+		snap.Services = readSystemServices(ctx, hints.Services)
 	}
 }
 

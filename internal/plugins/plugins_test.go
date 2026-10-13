@@ -212,6 +212,28 @@ func TestHostPluginValidation(t *testing.T) {
 	}
 }
 
+func TestLaunchdServiceValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		check Check
+		valid bool
+	}{
+		{name: "system service without process", check: Check{Type: CheckLaunchdService, Label: "com.apple.screensharing", Port: 5900}, valid: true},
+		{name: "missing label", check: Check{Type: CheckLaunchdService, Port: 5900}},
+		{name: "label with domain", check: Check{Type: CheckLaunchdService, Label: "system/com.apple.screensharing", Port: 5900}},
+		{name: "missing port", check: Check{Type: CheckLaunchdService, Label: "com.apple.screensharing"}},
+		{name: "invalid port", check: Check{Type: CheckLaunchdService, Label: "com.apple.screensharing", Port: 65536}},
+		{name: "job age is not service availability", check: Check{Type: CheckLaunchdService, Label: "com.apple.screensharing", Port: 5900, MaxAge: "10m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Plugin{ID: "example-service", Name: "Example Service", Checks: []Check{tc.check}}
+			if err := Validate(&p, BuiltinCosts()); (err == nil) != tc.valid {
+				t.Fatalf("validation: %v, want valid=%v", err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestCommandMatchAndNewChecks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
