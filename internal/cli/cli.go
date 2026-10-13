@@ -16,10 +16,13 @@ import (
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
 	"github.com/ZeroCool0388/daemon-doctor/internal/config"
+	"github.com/ZeroCool0388/daemon-doctor/internal/control"
 	"github.com/ZeroCool0388/daemon-doctor/internal/demo"
 	"github.com/ZeroCool0388/daemon-doctor/internal/doctor"
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
+	"github.com/ZeroCool0388/daemon-doctor/internal/mcpserver"
+	"github.com/ZeroCool0388/daemon-doctor/internal/offers"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
@@ -46,6 +49,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fixCmd(args[2:], stdin, stdout, stderr)
 	case "pair":
 		return pairCmd(args[2:], stdout, stderr)
+	case "mcp":
+		return mcpCmd(args[2:], stdin, stdout, stderr)
 	case "demo":
 		return demoCmd(args[2:], stdout, stderr)
 	default:
@@ -66,6 +71,7 @@ Usage:
   daemon-doctor fix --process name --action stop [--dry-run] [--yes] [--config path]
   daemon-doctor fix --approval file [--dry-run] [--config path]
   daemon-doctor demo
+  daemon-doctor mcp [--config path] [--demo] [--allow-fixes]
 
 status prints one check of each plug-in.
 run repeats checks on the configured interval until interrupted.
@@ -128,6 +134,23 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	defer book.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.ControlEnabled {
+		store, e := offers.Open(filepath.Dir(cfg.ControlSocket))
+		if e != nil {
+			fmt.Fprintf(stderr, "control error: %v\n", e)
+			return 1
+		}
+		d.UseOffers(store)
+		server, e := control.Listen(cfg.ControlSocket, &control.Local{Doctor: d, AllowFixes: cfg.ControlAllowFixes})
+		if e != nil {
+			fmt.Fprintf(stderr, "control error: %v\n", e)
+			return 1
+		}
+		defer server.Close()
+		done := make(chan error, 1)
+		go func() { done <- server.Serve(ctx) }()
+		defer func() { stop(); server.Close(); <-done }()
+	}
 	err = d.Run(ctx, cfg.Interval, func(rows []doctor.ServiceStatus) {
 		for _, row := range rows {
 			fmt.Fprint(stdout, formatStatus(row))
@@ -611,4 +634,55 @@ func statusText(status string) string {
 	default:
 		return status
 	}
+}
+
+func mcpCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to config.yaml")
+	demoMode := fs.Bool("demo", false, "use only scripted fake incidents")
+	allow := fs.Bool("allow-fixes", false, "enable fixes; requires per-call host approval and daemon opt-in")
+	if err := fs.Parse(args); err != nil {
+		return flagCode(err)
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "mcp does not take positional arguments")
+		return 2
+	}
+	if *demoMode && *configPath != "" {
+		fmt.Fprintln(stderr, "mcp --demo does not use --config")
+		return 2
+	}
+	var backend control.Backend
+	if *demoMode {
+		b, err := demo.NewMCP()
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		backend = b
+	} else {
+		path, err := resolveConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if !cfg.ControlEnabled {
+			fmt.Fprintln(stderr, "error: daemon control socket is disabled in config")
+			return 1
+		}
+		backend = &control.Client{Path: cfg.ControlSocket}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := mcpserver.Serve(ctx, backend, *allow || *demoMode, stdin, stdout); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
 }

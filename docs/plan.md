@@ -206,3 +206,14 @@ Dynamic diagnosis. iPhone app (later). Fixing anything not on the approved list.
 6. Should more than one phone be pairable?
 7. The public demo GIF: record from the Android demo mode or the terminal demo, or both?
 8. What happens if the relay is unreachable for a long time? Fall back to local-only logging and a daily summary when it's back?
+
+
+## Local MCP interface
+
+The local daemon serves a private Unix control socket, with stdio MCP tools for
+service health, check outcomes, recent events, fix offers and single-use fixes.
+See [MCP setup and reviewed safeguards](mcp.md). Live fixes require explicit
+opt-in at both the daemon and MCP client, plus per-call host approval; MCP
+destructive annotations alone do not guarantee a human prompt. Phone signing
+and relay transport remain separate. Demo MCP uses the existing fictional
+services and fake controller without config, keys, sockets or network.

@@ -13,6 +13,7 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
+	"github.com/ZeroCool0388/daemon-doctor/internal/offers"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
@@ -39,6 +40,12 @@ type Doctor struct {
 	Log     *logbook.Book
 
 	mu          sync.Mutex
+	offers      *offers.Store
+	active      map[string]rules.Alert
+	latest      []ServiceStatus
+	held        bool
+	sampledAt   time.Time
+	fixSource   string
 	now         func() time.Time
 	sec         *security.Store
 	relay       *relay.Client
@@ -80,6 +87,7 @@ func New(ps []plugins.Plugin, src sysprobe.Source, ctrl fixes.Controller, book *
 		Source:     src,
 		Checks:     runner,
 		lastStatus: map[string]string{},
+		active:     map[string]rules.Alert{},
 		Rules:      rules.NewEngine(now),
 		Fixes: &fixes.Runner{
 			Source:  src,
@@ -149,6 +157,7 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 		samples = append(samples, rules.Sample{Plugin: row.plugin, Outcomes: row.outcomes})
 	}
 	machine := d.Rules.DecideMachine(d.now(), snap, samples)
+	d.held = machine.Hold
 
 	out := make([]ServiceStatus, 0, len(rows))
 	for _, row := range rows {
@@ -187,6 +196,9 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 	if err := d.logSummary(out); err != nil {
 		return nil, err
 	}
+	d.latest = out
+	d.sampledAt = d.now()
+	d.pruneAlerts()
 	d.intake(ctx)
 	return out, nil
 }
@@ -264,6 +276,9 @@ func (d *Doctor) Run(ctx context.Context, interval time.Duration, onCycle func([
 func (d *Doctor) ApplyFix(ctx context.Context, serviceID, action string, dryRun bool) (fixes.Result, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	previous := d.fixSource
+	d.fixSource = "cli"
+	defer func() { d.fixSource = previous }()
 	return d.applyFix(ctx, serviceID, action, dryRun)
 }
 
@@ -275,6 +290,11 @@ func (d *Doctor) applyFix(ctx context.Context, serviceID, action string, dryRun 
 			return fixes.Result{}, logErr
 		}
 		return fixes.Result{}, err
+	}
+	for id, a := range d.active {
+		if a.ServiceID == serviceID {
+			delete(d.active, id)
+		}
 	}
 	res, err := d.Fixes.Apply(ctx, p, action, dryRun)
 	if logErr := d.logFix(p, action, dryRun, res, err); logErr != nil && err == nil {
@@ -300,6 +320,9 @@ func (d *Doctor) applyFix(ctx context.Context, serviceID, action string, dryRun 
 func (d *Doctor) ApplyStop(ctx context.Context, processName string, dryRun bool) (fixes.Result, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	previous := d.fixSource
+	d.fixSource = "cli"
+	defer func() { d.fixSource = previous }()
 	return d.applyStop(ctx, processName, dryRun, false)
 }
 
@@ -318,6 +341,11 @@ func (d *Doctor) applyStop(ctx context.Context, processName string, dryRun, prea
 			return fixes.Result{}, logErr
 		}
 		return fixes.Result{}, err
+	}
+	for id, a := range d.active {
+		if a.ServiceID == rules.UnwatchedID && a.Process == processName {
+			delete(d.active, id)
+		}
 	}
 	res, err := d.Fixes.ApplyStop(ctx, processName, dryRun)
 	if logErr := d.logFix(p, plugins.FixStop, dryRun, res, err); logErr != nil && err == nil {
@@ -482,6 +510,7 @@ func (d *Doctor) logFix(p plugins.Plugin, requested string, dry bool, res fixes.
 	return d.Log.Append(logbook.Event{
 		Time:        d.now(),
 		Kind:        "fix",
+		Source:      d.fixSource,
 		ServiceID:   p.ID,
 		ServiceName: p.Name,
 		Action:      action,
@@ -502,6 +531,9 @@ func (d *Doctor) ApplyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 }
 
 func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fixes.Result, error) {
+	previous := d.fixSource
+	d.fixSource = "phone"
+	defer func() { d.fixSource = previous }()
 	approval, err := security.UnmarshalApproval(raw)
 	if err != nil {
 		_ = d.logRefusal("", err)
@@ -534,6 +566,12 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 
 func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 	actions := offeredActions(a)
+	if len(actions) > 0 && d.offers != nil {
+		if err := d.offers.Mint(d.now(), security.Raised{ID: a.ID, ServiceID: a.ServiceID, ServiceName: a.ServiceName, Kind: a.Kind, Actions: actions, Process: a.Process, At: a.At}, a.Message); err != nil {
+			return err
+		}
+	}
+	d.active[a.ID] = a
 	if d.sec != nil {
 		if err := d.sec.RecordAlert(security.Raised{
 			ID:          a.ID,
@@ -664,6 +702,7 @@ func (d *Doctor) logRefusal(alertID string, err error) error {
 	ev := logbook.Event{
 		Time:    d.now(),
 		Kind:    "approval",
+		Source:  d.fixSource,
 		AlertID: alertID,
 		Message: err.Error(),
 	}
@@ -681,6 +720,7 @@ func (d *Doctor) logAccepted(alertID, serviceID, action string) error {
 	return d.Log.Append(logbook.Event{
 		Time:      d.now(),
 		Kind:      "approval",
+		Source:    d.fixSource,
 		AlertID:   alertID,
 		ServiceID: serviceID,
 		Action:    action,

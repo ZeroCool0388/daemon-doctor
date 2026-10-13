@@ -16,6 +16,7 @@ import (
 
 // Event is one log line.
 type Event struct {
+	Source      string    `json:"source,omitempty"`
 	Time        time.Time `json:"time"`
 	Kind        string    `json:"kind"`
 	ServiceID   string    `json:"service_id,omitempty"`
