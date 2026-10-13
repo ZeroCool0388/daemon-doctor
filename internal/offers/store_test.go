@@ -106,6 +106,84 @@ func TestExpiredAndUnknown(t *testing.T) {
 	}
 }
 
+func TestMintDoesNotDuplicateLiveOrConsumedIncident(t *testing.T) {
+	s, _ := Open("")
+	now := time.Now()
+	alert := security.Raised{ID: "incident", At: now, Actions: []string{"stop", "restart"}}
+	for range 3 {
+		if err := s.Mint(now, alert, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _ := s.List(now)
+	if len(items) != 2 {
+		t.Fatalf("duplicated offers: %+v", items)
+	}
+	if _, err := s.Consume(now, items[0].ID, func(Offer) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Mint(now, alert, ""); err != nil {
+		t.Fatal(err)
+	}
+	if live, _ := s.List(now); len(live) != 0 {
+		t.Fatalf("consumed incident reissued: %+v", live)
+	}
+}
+
+func TestFixResultsAreDurableBoundToOfferAndRetainedBeyondExpiry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "control")
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := s.Mint(now, security.Raised{ID: "incident", ServiceID: "example", At: now, Actions: []string{"restart"}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := s.List(now)
+	id := items[0].ID
+	if res, err := s.ResultContext(context.Background(), now, id); err != nil || res != nil {
+		t.Fatal("unexecuted offer has result", res, err)
+	}
+	if _, err := s.Consume(now, id, func(Offer) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := other.ResultContext(context.Background(), now, id)
+	if err != nil || running == nil || running.Status != "running" || running.Fixed != nil {
+		t.Fatalf("running record: %+v %v", running, err)
+	}
+	fixed := true
+	if err := s.FinishResult(context.Background(), now, id, FixResult{OfferID: "forged", ServiceID: "forged", FixID: "forged", Status: "completed", Fixed: &fixed, Message: "Fixed."}); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(11 * time.Minute)
+	if err := other.Mint(later, security.Raised{ID: "other", At: later, Actions: []string{"stop"}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := other.ResultContext(context.Background(), later, id)
+	if err != nil || result == nil || result.Status != "completed" || result.OfferID != id || result.ServiceID != "example" || result.FixID != "restart" || result.Fixed == nil || !*result.Fixed {
+		t.Fatalf("durable result: %+v %v", result, err)
+	}
+	*result.Fixed = false
+	result, _ = other.ResultContext(context.Background(), later, id)
+	if !*result.Fixed {
+		t.Fatal("read changed durable result")
+	}
+	if _, err := s.Consume(later, id, func(Offer) error { return nil }); err == nil {
+		t.Fatal("completed offer replayed")
+	}
+	if err := s.FinishResult(context.Background(), later, id, FixResult{}); err == nil {
+		t.Fatal("completed result overwritten")
+	}
+	if result, err := other.ResultContext(context.Background(), now.Add(ResultRetention), id); err != nil || result != nil {
+		t.Fatal("result retention not bounded", result, err)
+	}
+}
+
 func TestRejectsUnsafeDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "public")
 	_ = os.Mkdir(dir, 0755)

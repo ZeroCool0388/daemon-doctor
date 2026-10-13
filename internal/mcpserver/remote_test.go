@@ -51,7 +51,7 @@ func TestRemoteMCPProtocolAndSharedFixHandlers(t *testing.T) {
 			}
 			remoteCall(t, dispatch, "ping", map[string]any{})
 			list := remoteCall(t, dispatch, "tools/list", map[string]any{})
-			if len(list["tools"].([]any)) != 5 {
+			if len(list["tools"].([]any)) != 6 {
 				t.Fatal("wrong tools")
 			}
 			read := remoteCall(t, dispatch, "tools/call", map[string]any{"name": "list_services", "arguments": map[string]any{}})

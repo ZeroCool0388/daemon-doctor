@@ -50,7 +50,7 @@ func TestToolSchemasAndAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 5 {
+	if len(list.Tools) != 6 {
 		t.Fatalf("tools %d", len(list.Tools))
 	}
 	for _, tool := range list.Tools {
@@ -99,6 +99,10 @@ func TestReadToolsAndFixedReplay(t *testing.T) {
 	res, err = cs.CallTool(ctx, params)
 	if err != nil || res.IsError || decoded(t, res)["fixed"] != true {
 		t.Fatalf("fix %v %v", res, err)
+	}
+	result, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_fix_result", Arguments: map[string]any{"offer_id": id}})
+	if err != nil || result.IsError || decoded(t, result)["status"] != "completed" || decoded(t, result)["result"].(map[string]any)["fixed"] != true {
+		t.Fatalf("recorded result: %+v %v", result, err)
 	}
 	res, err = cs.CallTool(ctx, params)
 	if err != nil || !res.IsError {

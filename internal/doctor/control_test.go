@@ -108,7 +108,11 @@ func TestOfferRefusesExpiredRecoveredAndChangedAllowlist(t *testing.T) {
 				t.Fatal("refused fix signalled")
 			}
 			list, err := d.OfferedFixes()
-			if err != nil || len(list) != 0 {
+			want := 0
+			if scenario == "expired" {
+				want = 1
+			}
+			if err != nil || len(list) != want {
 				t.Fatalf("inactive offers: %v %v", list, err)
 			}
 		})

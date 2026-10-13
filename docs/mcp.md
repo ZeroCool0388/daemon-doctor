@@ -1,7 +1,7 @@
 # Use with Cursor, Codex or Claude Desktop
 
-Daemon Doctor provides five local MCP tools: `list_services`,
-`get_service_details`, `recent_events`, `list_offered_fixes` and `run_fix`.
+Daemon Doctor provides six local MCP tools: `list_services`,
+`get_service_details`, `recent_events`, `list_offered_fixes`, `run_fix` and `get_fix_result`.
 The official Go MCP SDK serves them over stdio. Live tools talk to the
 already-running daemon through a private Unix socket; no HTTP listener,
 cloud API or LLM call is added to the monitor.
@@ -143,6 +143,9 @@ boundary against malicious software already running under that account.
   accepted. No command text, shell, arbitrary arguments or unknown RPC methods.
 - Each offer contains a random id, alert id, service id, fix id, message and
   expiry. Expiry is the existing ten-minute approval window.
+- When an unconsumed offer expires and the same incident remains active, the
+  next monitor check issues a fresh offer and alert id. Live offers do not
+  repeat, and renewals do not count as new failure incidents.
 - Acceptance rechecks the incident in the same daemon. Recovered incidents,
   host holds, changed allowlists and the existing three-incidents-in-an-hour
   rule withdraw offers. A withdrawn offer requires a fresh alert; it does not
@@ -153,6 +156,11 @@ boundary against malicious software already running under that account.
   does not restore the token. Optional `service` must match before consume.
 - Fixes use the existing controller, then recheck. Results include `fixed`,
   `message` and `detail`; a failed action is never reported as a successful fix.
+- `get_fix_result` reads the Mac's durable result for an `offer_id`, retained
+  for 24 hours. States include `running`, `completed`, `failed`, `interrupted`
+  and `dry_run`. Only a completed recheck confirms `fixed`. An `unknown` result
+  does not confirm delivery, execution, success or failure. Read the current
+  service state before deciding whether to approve another offer.
 - Accepted/refused local approvals and actual fix events record `source=mcp`.
   Phone and CLI fix events record their respective sources. The phone signing,
   pairing and relay protocol are unchanged.

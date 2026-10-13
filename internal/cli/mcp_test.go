@@ -30,7 +30,7 @@ func TestMCPProcess(t *testing.T) {
 	}
 	defer cs.Close()
 	list, err := cs.ListTools(ctx, nil)
-	if err != nil || len(list.Tools) != 5 {
+	if err != nil || len(list.Tools) != 6 {
 		t.Fatalf("stdio tools %v %v; %s", list, err, stderr.String())
 	}
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_services"})

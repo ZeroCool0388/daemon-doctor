@@ -17,15 +17,33 @@ import (
 )
 
 type Offer struct {
-	ID          string    `json:"offer_id"`
-	AlertID     string    `json:"alert_id"`
-	ServiceID   string    `json:"service_id"`
-	ServiceName string    `json:"service_name"`
-	FixID       string    `json:"fix_id"`
-	Message     string    `json:"message"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	Consumed    bool      `json:"consumed"`
+	ID          string     `json:"offer_id"`
+	AlertID     string     `json:"alert_id"`
+	ServiceID   string     `json:"service_id"`
+	ServiceName string     `json:"service_name"`
+	FixID       string     `json:"fix_id"`
+	Message     string     `json:"message"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	Consumed    bool       `json:"consumed"`
+	Result      *FixResult `json:"result,omitempty"`
 }
+
+// FixResult outlives the connection that requested execution. Fixed is absent
+// when an interrupted attempt could not finish its recheck.
+type FixResult struct {
+	OfferID   string    `json:"offer_id"`
+	ServiceID string    `json:"service_id"`
+	FixID     string    `json:"fix_id"`
+	Status    string    `json:"status"`
+	Fixed     *bool     `json:"fixed,omitempty"`
+	Message   string    `json:"message"`
+	Detail    string    `json:"detail,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+const ResultRetention = 24 * time.Hour
 
 type Store struct {
 	mu    sync.Mutex
@@ -139,11 +157,21 @@ func (s *Store) Mint(now time.Time, alert security.Raised, message string) error
 func (s *Store) MintContext(ctx context.Context, now time.Time, alert security.Raised, message string) error {
 	return s.transactionContext(ctx, func() error {
 		for id, o := range s.items {
-			if !now.Before(o.ExpiresAt) {
+			if !now.Before(o.ExpiresAt) && (o.Result == nil || !now.Before(o.Result.UpdatedAt.Add(ResultRetention))) {
 				delete(s.items, id)
 			}
 		}
 		for _, fix := range alert.Actions {
+			present := false
+			for _, o := range s.items {
+				if o.AlertID == alert.ID && o.FixID == fix && now.Before(o.ExpiresAt) {
+					present = true
+					break
+				}
+			}
+			if present {
+				continue
+			}
 			id := security.NewID()
 			s.items[id] = Offer{ID: id, AlertID: alert.ID, ServiceID: alert.ServiceID, ServiceName: alert.ServiceName, FixID: fix, Message: message, ExpiresAt: alert.At.Add(security.ApprovalTTL)}
 		}
@@ -195,6 +223,9 @@ func (s *Store) ConsumeContext(ctx context.Context, now time.Time, id string, va
 				s.items[key] = item
 			}
 		}
+		o = s.items[id]
+		o.Result = &FixResult{OfferID: id, ServiceID: o.ServiceID, FixID: o.FixID, Status: "running", Message: "Fix started; result pending.", StartedAt: now, UpdatedAt: now}
+		s.items[id] = o
 		if err := s.save(); err != nil {
 			return err
 		}
@@ -202,4 +233,42 @@ func (s *Store) ConsumeContext(ctx context.Context, now time.Time, id string, va
 		return nil
 	})
 	return out, err
+}
+
+func (s *Store) FinishResult(ctx context.Context, now time.Time, id string, result FixResult) error {
+	return s.transactionContext(ctx, func() error {
+		o, ok := s.items[id]
+		if !ok || !o.Consumed || o.Result == nil {
+			return fmt.Errorf("fix result has no consumed offer")
+		}
+		if o.Result.Status != "running" {
+			return fmt.Errorf("fix result already recorded")
+		}
+		result.OfferID, result.ServiceID, result.FixID = id, o.ServiceID, o.FixID
+		result.StartedAt, result.UpdatedAt = o.Result.StartedAt, now
+		if result.Fixed != nil {
+			fixed := *result.Fixed
+			result.Fixed = &fixed
+		}
+		o.Result = &result
+		s.items[id] = o
+		return s.save()
+	})
+}
+
+func (s *Store) ResultContext(ctx context.Context, now time.Time, id string) (*FixResult, error) {
+	var result *FixResult
+	err := s.transactionContext(ctx, func() error {
+		o, ok := s.items[id]
+		if ok && o.Result != nil && now.Before(o.Result.UpdatedAt.Add(ResultRetention)) {
+			copy := *o.Result
+			if copy.Fixed != nil {
+				fixed := *copy.Fixed
+				copy.Fixed = &fixed
+			}
+			result = &copy
+		}
+		return nil
+	})
+	return result, err
 }

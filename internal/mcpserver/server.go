@@ -1,4 +1,4 @@
-// Package mcpserver exposes only the five local Daemon Doctor tools over MCP.
+// Package mcpserver exposes Daemon Doctor's local tools over MCP.
 package mcpserver
 
 import (
@@ -22,6 +22,10 @@ type eventsInput struct {
 type fixInput struct {
 	OfferID string `json:"offer_id" jsonschema:"Single-use offer id from list_offered_fixes"`
 	Service string `json:"service,omitempty" jsonschema:"Optional service id which must match the offer"`
+}
+
+type fixResultInput struct {
+	OfferID string `json:"offer_id" jsonschema:"Offer id from run_fix, including a pending response"`
 }
 
 func New(backend control.Backend, allowFixes bool) *mcp.Server {
@@ -64,6 +68,9 @@ func New(backend control.Backend, allowFixes bool) *mcp.Server {
 			return nil, nil, fmt.Errorf("MCP fixes are disabled; enable fixes only after configuring per-call host approval")
 		}
 		return call(ctx, control.Request{Method: "run_fix", OfferID: in.OfferID, Service: in.Service})
+	})
+	mcp.AddTool(s, tool("get_fix_result", "Read a recorded fix result by offer_id after a pending response or reconnect. Does not execute or retry a fix. Results are retained for 24 hours; unknown is not evidence of success or failure.", true), func(ctx context.Context, _ *mcp.CallToolRequest, in fixResultInput) (*mcp.CallToolResult, map[string]any, error) {
+		return call(ctx, control.Request{Method: "fix_result", OfferID: in.OfferID})
 	})
 	return s
 }

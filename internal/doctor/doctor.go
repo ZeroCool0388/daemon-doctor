@@ -204,6 +204,17 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 	if err := d.logSummary(out); err != nil {
 		return nil, err
 	}
+	renewed, err := d.renewExpiredOffers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, alert := range renewed {
+		for i := range out {
+			if out[i].ID == alert.ServiceID {
+				out[i].Alerts = append(out[i].Alerts, alert)
+			}
+		}
+	}
 	for _, row := range out {
 		if p, ok := d.find(row.ID); ok && !p.Host {
 			d.queueNotification(row)
