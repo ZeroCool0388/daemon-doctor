@@ -44,6 +44,10 @@ func (r Request) Validate() error {
 		if r.OfferID == "" || r.ID != "" || r.Limit != 0 {
 			return fmt.Errorf("run_fix requires offer_id and optional service")
 		}
+	case "fix_result":
+		if r.OfferID == "" || r.ID != "" || r.Limit != 0 || r.Service != "" {
+			return fmt.Errorf("fix_result requires only offer_id")
+		}
 	default:
 		return fmt.Errorf("unknown control method %q", r.Method)
 	}
@@ -85,6 +89,15 @@ func (b *Local) Call(ctx context.Context, r Request) (any, error) {
 		}
 		res, err := b.Doctor.ApplyOffer(ctx, r.OfferID, r.Service, false)
 		return map[string]any{"fixed": err == nil && res.Fixed, "message": logbook.Blank(res.Message), "detail": logbook.Blank(res.Detail)}, err
+	case "fix_result":
+		result, err := b.Doctor.FixResultContext(ctx, r.OfferID)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return map[string]any{"offer_id": r.OfferID, "status": "unknown", "message": "No recorded result for this offer. Delivery or execution is not confirmed."}, nil
+		}
+		return map[string]any{"result": result, "offer_id": r.OfferID, "status": result.Status}, nil
 	}
 	return nil, fmt.Errorf("unknown method")
 }

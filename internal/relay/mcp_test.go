@@ -253,6 +253,72 @@ func TestMCPLinkDoesNotDispatchExpiredForward(t *testing.T) {
 	}
 }
 
+func TestMCPLinkFixCanFinishAfterDisconnectButStillHonorsDeadlineAndShutdown(t *testing.T) {
+	for _, scenario := range []string{"finish", "deadline", "shutdown"} {
+		t.Run(scenario, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			sock := newFakeLink()
+			started := make(chan context.Context, 1)
+			release := make(chan struct{})
+			ended := make(chan error, 1)
+			link := &MCPLink{Client: fakeMCPClient(t, nil), MacID: strings.Repeat("e", 32), Secret: "private",
+				dial: func(context.Context, string, *websocket.DialOptions) (linkSocket, error) { return sock, nil },
+				Dispatch: func(ctx context.Context, _ json.RawMessage, _ http.Header) json.RawMessage {
+					started <- ctx
+					select {
+					case <-release:
+						ended <- ctx.Err()
+						return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"fixed":true}}`)
+					case <-ctx.Done():
+						ended <- ctx.Err()
+						return nil
+					}
+				},
+			}
+			done := make(chan error, 1)
+			go func() { done <- link.connect(parent) }()
+			deadline := time.Now().Add(500 * time.Millisecond)
+			if scenario == "deadline" {
+				deadline = time.Now().Add(150 * time.Millisecond)
+			}
+			frame, _ := json.Marshal(map[string]any{"id": "fix", "deadline_unix_ms": deadline.UnixMilli(), "request": map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "run_fix", "arguments": map[string]any{"offer_id": strings.Repeat("a", 32)}}}})
+			sock.incoming <- frame
+			var callCtx context.Context
+			select {
+			case callCtx = <-started:
+			case <-parent.Done():
+				t.Fatal("fix did not start")
+			}
+			sock.incoming <- nil
+			for !sock.closed.Load() && parent.Err() == nil {
+				time.Sleep(time.Millisecond)
+			}
+			if scenario == "finish" {
+				if callCtx.Err() != nil {
+					t.Fatal("disconnect cancelled an authorized fix")
+				}
+				close(release)
+			} else if scenario == "shutdown" {
+				cancel()
+			}
+			select {
+			case err := <-ended:
+				if scenario == "finish" && err != nil || scenario == "deadline" && !errors.Is(err, context.DeadlineExceeded) || scenario == "shutdown" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("wrong fix context: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("fix did not finish or cancel")
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("link shutdown hung")
+			}
+		})
+	}
+}
+
 func TestMCPLinkForwardsClientProtocolHeaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

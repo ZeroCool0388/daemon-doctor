@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
@@ -145,7 +146,7 @@ func (d *Doctor) OfferedFixesContext(ctx context.Context) ([]offers.Offer, error
 
 // ApplyOffer is a local capability path, independent of signed phone approval.
 // The optional service match is checked before any token is consumed.
-func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool) (fixes.Result, error) {
+func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool) (res fixes.Result, err error) {
 	if err := d.lockContext(ctx); err != nil {
 		return fixes.Result{}, err
 	}
@@ -181,16 +182,41 @@ func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool
 		return refuse(err)
 	}
 	a := d.active[o.AlertID]
-	if err = d.logAccepted(o.AlertID, o.ServiceID, o.FixID); err != nil {
-		return fixes.Result{}, err
-	}
+	// Finalization writes data only; it never extends execution past ctx.
+	defer func() {
+		result := offers.FixResult{Status: "completed", Message: logbook.Blank(res.Message), Detail: logbook.Blank(res.Detail)}
+		if dryRun && err == nil {
+			result.Status = "dry_run"
+			result.Message = "Dry run completed; no fix was applied."
+		} else if !dryRun && (err == nil || res.Fixed) {
+			fixed := res.Fixed
+			result.Fixed = &fixed
+		} else {
+			result.Status = "failed"
+			result.Error = logbook.Blank(err.Error())
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				result.Status = "interrupted"
+				result.Message = "Fix was interrupted before its recheck completed. Check the service state."
+			}
+		}
+		if result.Message == "" {
+			result.Message = "Fix could not complete."
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if saveErr := d.offers.FinishResult(cleanup, d.now(), id, result); saveErr != nil && err == nil {
+			err = saveErr
+		}
+	}()
 	// Retire every alternative for this service, including other incident kinds.
 	for key, alert := range d.active {
 		if alert.ServiceID == o.ServiceID {
 			delete(d.active, key)
 		}
 	}
-	var res fixes.Result
+	if err = d.logAccepted(o.AlertID, o.ServiceID, o.FixID); err != nil {
+		return fixes.Result{}, err
+	}
 	if o.ServiceID == rules.UnwatchedID {
 		res, err = d.applyStop(ctx, a.Process, dryRun, true)
 	} else {
@@ -202,6 +228,54 @@ func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool
 		err = checkErr
 	}
 	return res, err
+}
+
+func (d *Doctor) FixResultContext(ctx context.Context, id string) (*offers.FixResult, error) {
+	if err := d.lockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer d.mu.Unlock()
+	if d.offers == nil {
+		return nil, fmt.Errorf("local fix offers are disabled")
+	}
+	return d.offers.ResultContext(ctx, d.now(), id)
+}
+
+// Renew only expired capabilities for an active incident, without advancing
+// failure counts or reviving consumed, held or withdrawn incidents. Renewal
+// updates the active snapshot and offers without emitting a new incident alert.
+func (d *Doctor) renewExpiredOffers(ctx context.Context) error {
+	var expired []rules.Alert
+	for _, alert := range d.active {
+		if !d.held && alert.OfferFix && d.Rules.AlertActive(alert) && !d.now().Before(alert.At.Add(security.ApprovalTTL)) {
+			expired = append(expired, alert)
+		}
+	}
+	for _, old := range expired {
+		next := old
+		next.ID, next.At = security.NewID(), d.now()
+		if old.ServiceID != rules.UnwatchedID {
+			p, ok := d.find(old.ServiceID)
+			if !ok {
+				continue
+			}
+			next.Actions = nil
+			for _, action := range offeredActions(old) {
+				if plugins.Approved(p, action) {
+					next.Actions = append(next.Actions, action)
+				}
+			}
+			if len(next.Actions) == 0 {
+				continue
+			}
+			next.Action = next.Actions[0]
+		}
+		if err := d.noteAlert(ctx, next); err != nil {
+			return err
+		}
+		delete(d.active, old.ID)
+	}
+	return nil
 }
 
 func (d *Doctor) RecordMCPRefusal(id, message string) {

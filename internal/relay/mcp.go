@@ -255,9 +255,15 @@ func (l *MCPLink) connect(parent context.Context) error {
 		go func(id string, request json.RawMessage, headers http.Header, deadline time.Time) {
 			defer workers.Done()
 			defer func() { <-slots }()
-			callCtx, stop := context.WithDeadline(ctx, deadline)
+			base := ctx
+			// An authorized fix may disrupt its own transport. Keep it bounded
+			// by the relay deadline and daemon shutdown, rather than this socket.
+			if runFixRequest(request) {
+				base = parent
+			}
+			callCtx, stop := context.WithDeadline(base, deadline)
 			defer stop()
-			if callCtx.Err() != nil {
+			if callCtx.Err() != nil || ctx.Err() != nil {
 				return
 			}
 			reply := l.Dispatch(callCtx, request, headers)
@@ -278,4 +284,14 @@ func (l *MCPLink) connect(parent context.Context) error {
 			}
 		}(frame.ID, frame.Request, headers, deadline)
 	}
+}
+
+func runFixRequest(raw json.RawMessage) bool {
+	var rpc struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	return json.Unmarshal(raw, &rpc) == nil && rpc.Method == "tools/call" && rpc.Params.Name == "run_fix"
 }

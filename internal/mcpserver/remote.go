@@ -20,7 +20,8 @@ type requestBackend struct {
 
 func (b requestBackend) Call(_ context.Context, r control.Request) (any, error) {
 	// Legacy MCP sessions detach the SDK handler context. Never use that detached
-	// context for backend execution: the link deadline and disconnect govern it.
+	// context for backend execution: the forwarded deadline governs it. An
+	// authorized fix can finish within that deadline after a socket disconnect.
 	if err := b.context.Err(); err != nil {
 		return nil, err
 	}

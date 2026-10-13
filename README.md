@@ -51,7 +51,7 @@ Android app remains an optional extra for service views and signed fix approvals
 `daemon-doctor mcp` exposes service health, check details, recent events and
 current fix offers through the running daemon's private local socket. Live
 fixes are disabled by default. `daemon-doctor mcp --demo` lets you try all
-five tools against scripted fake incidents without config or network.
+six tools against scripted fake incidents without config or network.
 
 See [setup examples and approval requirements](docs/mcp.md) for each client.
 MCP destructive annotations cannot enforce human approval: live fixes need
@@ -61,7 +61,13 @@ both daemon and MCP opt-in, plus a client configured to confirm each call.
 
 A cloud MCP client can connect through the same Cloudflare relay. The Mac
 keeps an authenticated outbound WebSocket; it needs no inbound port or phone
-pairing. Remote calls use the same five MCP tools and fix handlers as stdio.
+pairing. Remote calls use the same six MCP tools and fix handlers as stdio.
+
+If a fix disrupts the link, the relay reports a pending result instead of
+reporting the Mac unreachable for that request. After reconnecting, use
+`get_fix_result` with the same `offer_id` to read the recorded outcome. Do not
+repeat `run_fix` to check its result. Fix execution remains bounded by the
+forwarded deadline and daemon shutdown.
 
 Enable the link in the Mac config, then run the daemon:
 

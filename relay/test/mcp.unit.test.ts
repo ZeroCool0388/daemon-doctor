@@ -134,6 +134,52 @@ describe("remote MCP", () => {
     expect(await (await call).json()).toMatchObject({ result: { isError: true } });
   });
 
+  it("returns a pending fix on disconnect and confirms its result after reconnect", async () => {
+    const f = await registered();
+    const offerID = "a".repeat(32);
+    const frames: any[] = [];
+    const socket = { readyState: 1, send: (raw: string) => frames.push(JSON.parse(raw)) } as unknown as WebSocket;
+    f.sockets.push(socket);
+    const call = f.mcp.fetch("mcp", request("mcp", "POST", token, { ...rpc("tools/call"), params: { name: "run_fix", arguments: { offer_id: offerID } } }));
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    await f.mcp.closed(socket);
+    expect(await (await call).json()).toMatchObject({ result: { structuredContent: { offer_id: offerID, status: "pending" } } });
+    let replies = 0;
+    const replacement = { readyState: 1, send: (raw: string) => {
+      const frame = JSON.parse(raw);
+      expect(frame.request.params.name).toBe("get_fix_result");
+      expect(frame.request.params.arguments.offer_id).toBe(offerID);
+      replies++;
+      const result = { offer_id: offerID, status: "completed", result: { fixed: true } };
+      void f.mcp.message(replacement as WebSocket, JSON.stringify({ id: frame.id, response: { jsonrpc: "2.0", id: frame.request.id, result: { structuredContent: result } } }));
+    } } as unknown as WebSocket;
+    f.sockets.splice(0, 1, replacement);
+    const confirmed = await f.mcp.fetch("mcp", request("mcp", "POST", token, { ...rpc("tools/call"), params: { name: "get_fix_result", arguments: { offer_id: offerID } } }));
+    expect(await confirmed.json()).toMatchObject({ result: { structuredContent: { status: "completed", result: { fixed: true } } } });
+    expect(replies).toBe(1);
+    expect(frames).toHaveLength(1);
+  });
+
+  it("returns pending on a forwarded fix timeout, but does not claim an offline request started", async () => {
+    const f = await registered();
+    const offerID = "b".repeat(32);
+    const fix = { ...rpc("tools/call"), params: { name: "run_fix", arguments: { offer_id: offerID } } };
+    const offline = await f.mcp.fetch("mcp", request("mcp", "POST", token, fix));
+    expect(await offline.json()).toMatchObject({ result: { isError: true } });
+    let sent!: () => void;
+    const forwarded = new Promise<void>(resolve => { sent = resolve; });
+    const socket = { readyState: 1, send: sent } as unknown as WebSocket;
+    f.sockets.push(socket);
+    vi.useFakeTimers();
+    const call = f.mcp.fetch("mcp", request("mcp", "POST", token, fix));
+    await forwarded;
+    await vi.advanceTimersByTimeAsync(15_000);
+    const response = await (await call).json() as any;
+    expect(response.result.isError).not.toBe(true);
+    expect(response.result.structuredContent).toMatchObject({ offer_id: offerID, status: "pending" });
+    expect(JSON.stringify(response)).not.toContain("Mac unreachable");
+  });
+
   it("accepts notifications and rejects unsupported HTTP methods and invalid bodies", async () => {
     const f = await registered();
     const res = await f.mcp.fetch("mcp", request("mcp", "POST", token, { jsonrpc: "2.0", method: "notifications/initialized" }));

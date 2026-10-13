@@ -151,6 +151,7 @@ export class RemoteMCP {
     }
     if (this.pending.size >= 64) return Response.json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message: "Too many pending requests" } }, { headers });
     let response: unknown;
+    let attempted = false;
     if (ws) {
       response = await new Promise(resolve => {
         const timer = setTimeout(() => finish(), TIMEOUT);
@@ -160,14 +161,22 @@ export class RemoteMCP {
           resolve(reply);
         };
         this.pending.set(id, { ws, rpcID: rpc.id!, finish });
+        attempted = true;
         try { ws.send(JSON.stringify({ id, request: rpc, protocol_version: protocolVersion ?? "", mcp_headers: mcpHeaders, deadline_unix_ms: Date.now() + 14_000 })); } catch { finish(); }
       });
     }
     if (response === undefined) {
-      const message = `Mac unreachable, last seen ${await this.lastSeen(ws)}`;
-      response = rpc.method === "tools/call"
-        ? { jsonrpc: "2.0", id: rpc.id, result: { isError: true, content: [{ type: "text", text: message }] } }
-        : { jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message } };
+      const params = rpc.params as { name?: unknown; arguments?: { offer_id?: unknown } } | undefined;
+      const offerID = params?.arguments?.offer_id;
+      if (attempted && rpc.method === "tools/call" && params?.name === "run_fix" && typeof offerID === "string" && /^[a-f0-9]{32}$/.test(offerID)) {
+        const result = { offer_id: offerID, status: "pending", message: "Fix request sent; result pending. Check get_fix_result after the Mac reconnects. Delivery and execution are not yet confirmed; do not retry the fix." };
+        response = { jsonrpc: "2.0", id: rpc.id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result } };
+      } else {
+        const message = `Mac unreachable, last seen ${await this.lastSeen(ws)}`;
+        response = rpc.method === "tools/call"
+          ? { jsonrpc: "2.0", id: rpc.id, result: { isError: true, content: [{ type: "text", text: message }] } }
+          : { jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message } };
+      }
     }
     return Response.json(response, { headers });
   }
