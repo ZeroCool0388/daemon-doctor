@@ -10,6 +10,9 @@ import (
 )
 
 // OSController signals and launches processes on the local machine.
+// It deliberately does not implement LifetimeSignaler: kill(2) addresses a
+// numeric PID and cannot bind a StartTime check to delivery of the signal.
+// Relaunch therefore refuses its KILL fallback when using this controller.
 type OSController struct{}
 
 // The app name is data in argv, never interpolated into AppleScript source.
