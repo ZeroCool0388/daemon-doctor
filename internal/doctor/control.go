@@ -26,7 +26,12 @@ func (d *Doctor) pruneAlerts() {
 
 // Snapshot returns the last completed monitor cycle. Reads never drive rules.
 func (d *Doctor) Snapshot() ([]ServiceStatus, time.Time, error) {
-	d.mu.Lock()
+	return d.SnapshotContext(context.Background())
+}
+func (d *Doctor) SnapshotContext(ctx context.Context) ([]ServiceStatus, time.Time, error) {
+	if err := d.lockContext(ctx); err != nil {
+		return nil, time.Time{}, err
+	}
 	defer d.mu.Unlock()
 	if d.sampledAt.IsZero() {
 		return nil, time.Time{}, fmt.Errorf("daemon has not completed its first check")
@@ -51,7 +56,12 @@ func (d *Doctor) Snapshot() ([]ServiceStatus, time.Time, error) {
 }
 
 func (d *Doctor) RecentEvents(limit int) ([]logbook.Event, error) {
-	d.mu.Lock()
+	return d.RecentEventsContext(context.Background(), limit)
+}
+func (d *Doctor) RecentEventsContext(ctx context.Context, limit int) ([]logbook.Event, error) {
+	if err := d.lockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer d.mu.Unlock()
 	if limit <= 0 {
 		limit = 20
@@ -110,13 +120,18 @@ func (d *Doctor) offerValid(o offers.Offer) error {
 }
 
 func (d *Doctor) OfferedFixes() ([]offers.Offer, error) {
-	d.mu.Lock()
+	return d.OfferedFixesContext(context.Background())
+}
+func (d *Doctor) OfferedFixesContext(ctx context.Context) ([]offers.Offer, error) {
+	if err := d.lockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer d.mu.Unlock()
 	out := []offers.Offer{}
 	if d.offers == nil {
 		return out, nil
 	}
-	all, err := d.offers.List(d.now())
+	all, err := d.offers.ListContext(ctx, d.now())
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +146,9 @@ func (d *Doctor) OfferedFixes() ([]offers.Offer, error) {
 // ApplyOffer is a local capability path, independent of signed phone approval.
 // The optional service match is checked before any token is consumed.
 func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool) (fixes.Result, error) {
-	d.mu.Lock()
+	if err := d.lockContext(ctx); err != nil {
+		return fixes.Result{}, err
+	}
 	defer d.mu.Unlock()
 	previous := d.fixSource
 	d.fixSource = "mcp"
@@ -151,7 +168,7 @@ func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool
 	if err := ctx.Err(); err != nil {
 		return refuse(err)
 	}
-	o, err := d.offers.Consume(d.now(), id, func(o offers.Offer) error {
+	o, err := d.offers.ConsumeContext(ctx, d.now(), id, func(o offers.Offer) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -188,10 +205,21 @@ func (d *Doctor) ApplyOffer(ctx context.Context, id, service string, dryRun bool
 }
 
 func (d *Doctor) RecordMCPRefusal(id, message string) {
-	d.mu.Lock()
+	d.RecordMCPRefusalContext(context.Background(), id, message)
+}
+func (d *Doctor) RecordMCPRefusalContext(ctx context.Context, id, message string) {
+	if d.lockContext(ctx) != nil {
+		return
+	}
 	defer d.mu.Unlock()
 	previous := d.fixSource
 	d.fixSource = "mcp"
 	defer func() { d.fixSource = previous }()
 	_ = d.logRefusal(id, fmt.Errorf("%s", message))
+}
+
+// No detached waiter goroutine: cancellation stops a queued backend call before
+// it can acquire the monitor lock and start reading or applying an offer.
+func (d *Doctor) lockContext(ctx context.Context) error {
+	return security.LockMutexContext(ctx, &d.mu)
 }

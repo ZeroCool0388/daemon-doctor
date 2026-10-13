@@ -172,7 +172,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "MCP link error: %v\n", e)
 			return 1
 		}
-		link := &relay.MCPLink{Client: client, MacID: sec.MacID(), Secret: secret,
+		link := &relay.MCPLink{Client: client, MacID: sec.MCPMacID(), Secret: secret, Registration: sec.MCPRegistration(secret),
 			Dispatch: mcpserver.RemoteDispatch(&control.Local{Doctor: d, AllowFixes: cfg.ControlAllowFixes}, cfg.ControlAllowFixes)}
 		done := make(chan struct{})
 		go func() { defer close(done); link.Run(ctx, func(err error) { fmt.Fprintf(stderr, "%v\n", err) }) }()

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/offers"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
@@ -211,5 +212,42 @@ func TestPreviousDaemonOffersAreInactive(t *testing.T) {
 	}
 	if ctrl.signals != 0 {
 		t.Fatal("previous instance offer signalled")
+	}
+}
+
+func TestMCPBackendLockWaitsAreCancelled(t *testing.T) {
+	d, _, _, ctrl := offerDoctor(t)
+	items, _ := d.OfferedFixes()
+	calls := map[string]func(context.Context) error{
+		"status":  func(ctx context.Context) error { _, _, err := d.SnapshotContext(ctx); return err },
+		"events":  func(ctx context.Context) error { _, err := d.RecentEventsContext(ctx, 20); return err },
+		"offers":  func(ctx context.Context) error { _, err := d.OfferedFixesContext(ctx); return err },
+		"run_fix": func(ctx context.Context) error { _, err := d.ApplyOffer(ctx, items[0].ID, "", false); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			d.mu.Lock()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- call(ctx) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Error(err)
+				}
+			case <-time.After(time.Second):
+				d.mu.Unlock()
+				t.Fatal("backend lock wait hung shutdown")
+			}
+			d.mu.Unlock()
+		})
+	}
+	if ctrl.signals != 0 {
+		t.Fatal("timed-out queued fix signalled")
+	}
+	remaining, err := d.OfferedFixes()
+	if err != nil || len(remaining) != 1 || remaining[0].Consumed {
+		t.Fatal("timed-out queued fix consumed an offer", err)
 	}
 }

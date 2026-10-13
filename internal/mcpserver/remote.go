@@ -6,22 +6,46 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"github.com/ZeroCool0388/daemon-doctor/internal/control"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+type requestBackend struct {
+	context context.Context
+	backend control.Backend
+}
+
+func (b requestBackend) Call(_ context.Context, r control.Request) (any, error) {
+	// Legacy MCP sessions detach the SDK handler context. Never use that detached
+	// context for backend execution: the link deadline and disconnect govern it.
+	if err := b.context.Err(); err != nil {
+		return nil, err
+	}
+	return b.backend.Call(b.context, r)
+}
+
 // RemoteDispatch serves sessionless JSON MCP in memory: no TCP listener is used.
 // The SDK handles protocol validation, schemas and the existing tool handlers.
-func RemoteDispatch(backend control.Backend, allowFixes bool) func(context.Context, json.RawMessage) json.RawMessage {
-	server := New(backend, allowFixes)
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	return func(ctx context.Context, raw json.RawMessage) json.RawMessage {
+func RemoteDispatch(backend control.Backend, allowFixes bool) func(context.Context, json.RawMessage, http.Header) json.RawMessage {
+	handler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
+		return New(requestBackend{context: req.Context(), backend: backend}, allowFixes)
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, PropagateRequestCancellation: true})
+	return func(ctx context.Context, raw json.RawMessage, headers http.Header) json.RawMessage {
+		if ctx.Err() != nil {
+			return nil
+		}
 		req := httptest.NewRequest(http.MethodPost, "http://localhost/mcp", bytes.NewReader(raw)).WithContext(ctx)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+		for name, values := range headers {
+			key := strings.ToLower(name)
+			if key == "mcp-protocol-version" || key == "mcp-method" || key == "mcp-name" || strings.HasPrefix(key, "mcp-param-") {
+				req.Header[name] = append([]string(nil), values...)
+			}
+		}
 		out := httptest.NewRecorder()
 		handler.ServeHTTP(out, req)
 		if out.Code == http.StatusAccepted {

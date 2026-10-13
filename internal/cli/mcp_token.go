@@ -16,7 +16,7 @@ func mcpTokenCmd(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return code
 	}
-	err := issueMCPToken(path, stdout)
+	err := issueMCPToken(path, stdout, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -24,7 +24,7 @@ func mcpTokenCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func issueMCPToken(path string, out io.Writer) error {
+func issueMCPToken(path string, out, stderr io.Writer) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
@@ -50,12 +50,13 @@ func issueMCPToken(path string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := client.RegisterMCPLink(ctx, sec.MacID(), secret); err != nil {
+	if err := client.RegisterMCPLink(ctx, sec.MCPMacID(), secret, sec.MCPRegistration(secret)); err != nil {
 		return err
 	}
-	if err := client.RegisterMCPToken(ctx, sec.MacID(), secret, hash); err != nil {
+	if err := client.RegisterMCPToken(ctx, sec.MCPMacID(), secret, hash); err != nil {
 		return err
 	}
+	fmt.Fprintf(stderr, "Remote MCP URL: %s/v1/macs/%s/mcp\n", client.BaseURL, sec.MCPMacID())
 	// The plaintext token is not saved; only this successful issuance prints it.
 	_, err = fmt.Fprintln(out, token)
 	return err

@@ -51,12 +51,15 @@ func (r Request) Validate() error {
 }
 
 func (b *Local) Call(ctx context.Context, r Request) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
 	switch r.Method {
 	case "status", "service":
-		rows, at, err := b.Doctor.Snapshot()
+		rows, at, err := b.Doctor.SnapshotContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -70,14 +73,14 @@ func (b *Local) Call(ctx context.Context, r Request) (any, error) {
 		}
 		return map[string]any{"services": rows, "sampled_at": at}, nil
 	case "events":
-		events, err := b.Doctor.RecentEvents(r.Limit)
+		events, err := b.Doctor.RecentEventsContext(ctx, r.Limit)
 		return map[string]any{"events": events}, err
 	case "offers":
-		items, err := b.Doctor.OfferedFixes()
+		items, err := b.Doctor.OfferedFixesContext(ctx)
 		return map[string]any{"offers": items, "fixes_enabled": b.AllowFixes}, err
 	case "run_fix":
 		if !b.AllowFixes {
-			b.Doctor.RecordMCPRefusal(r.OfferID, "MCP fixes are disabled in the daemon configuration")
+			b.Doctor.RecordMCPRefusalContext(ctx, r.OfferID, "MCP fixes are disabled in the daemon configuration")
 			return nil, fmt.Errorf("MCP fixes are disabled in the daemon configuration")
 		}
 		res, err := b.Doctor.ApplyOffer(ctx, r.OfferID, r.Service, false)

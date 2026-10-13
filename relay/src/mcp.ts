@@ -10,6 +10,37 @@ export async function tokenHash(token: string): Promise<string> {
   return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+function decodeKey(value: unknown, size: number): Uint8Array | undefined {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return;
+  try {
+    const raw = atob(value.replaceAll("-", "+").replaceAll("_", "/"));
+    if (raw.length !== size || btoa(raw).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") !== value) return;
+    return Uint8Array.from(raw, c => c.charCodeAt(0));
+  } catch { return; }
+}
+
+// A supplied signing key is not a trust anchor for a random id. Deriving the
+// endpoint id from the public key prevents another key from claiming that id.
+async function ownership(request: Request, parsed: unknown): Promise<boolean> {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const proof = parsed as { secret_hash?: unknown; public_key?: unknown; signature?: unknown };
+  const publicKey = decodeKey(proof.public_key, 32);
+  const signature = decodeKey(proof.signature, 64);
+  if (!publicKey || !signature || typeof proof.secret_hash !== "string" || !HASH.test(proof.secret_hash)) return false;
+  const prefix = new TextEncoder().encode("daemon-doctor/mcp-identity/v1\n");
+  const keyIDBytes = new Uint8Array(prefix.length + publicKey.length);
+  keyIDBytes.set(prefix); keyIDBytes.set(publicKey, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", keyIDBytes));
+  const keyID = [...digest.slice(0, 16)].map(b => b.toString(16).padStart(2, "0")).join("");
+  const macID = new URL(request.url).pathname.split("/")[3];
+  if (keyID !== macID) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
+    const message = new TextEncoder().encode(`daemon-doctor/mcp-link/v1\nmac_id=${macID}\npublic_key=${proof.public_key}\nsecret_hash=${proof.secret_hash}`);
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, signature, message);
+  } catch { return false; }
+}
+
 async function authenticated(request: Request, hash: string | undefined): Promise<boolean> {
   const auth = request.headers.get("Authorization") ?? "";
   if (!/^Bearer [A-Za-z0-9_-]{43}$/.test(auth)) return false;
@@ -46,20 +77,29 @@ export class RemoteMCP {
 
   async fetch(route: string, request: Request): Promise<Response> {
     if (route === "mcp-link" && request.method === "PUT") {
-      // First registration claims a random Mac id; subsequent registrations must
-      // prove possession of the existing secret and cannot replace its hash.
+      // Registration requires the signing key bound to the endpoint id. The
+      // existing link secret must also match on subsequent registrations.
       let parsed: unknown;
       try { parsed = await body(request); } catch { return new Response("invalid body", { status: 400 }); }
       const hash = (parsed as { secret_hash?: unknown } | null)?.secret_hash;
       if (typeof hash !== "string" || !HASH.test(hash)) return new Response("invalid hash", { status: 400 });
+      if (!await ownership(request, parsed)) return unauthorized();
       const ok = await this.ctx.storage.transaction(async txn => {
-        const stored = await txn.get<string>("mcp_link_hash");
+        const publicKey = (parsed as { public_key: string }).public_key;
+        const registeredKey = await txn.get<string>("mcp_identity_key");
+        if (registeredKey !== undefined && registeredKey !== publicKey) return false;
+        // An old unsigned enrollment is not an ownership claim. The verified
+        // owner can reclaim it, revoking any token issued by a squatter.
+        const stored = registeredKey === undefined ? undefined : await txn.get<string>("mcp_link_hash");
         if (!await authenticated(request, stored ?? hash) || (stored !== undefined && stored !== hash)) return false;
+        if (registeredKey === undefined) await txn.delete("mcp_token_hash");
+        await txn.put("mcp_identity_key", publicKey);
         await txn.put("mcp_link_hash", hash);
         return true;
       });
       return ok ? Response.json({ registered: true }) : unauthorized();
     }
+    if (!await this.ctx.storage.get<string>("mcp_identity_key")) return unauthorized();
     const key = route === "mcp" ? "mcp_token_hash" : "mcp_link_hash";
     if (!await authenticated(request, await this.ctx.storage.get<string>(key))) return unauthorized();
     if (route === "mcp-token") {
@@ -99,8 +139,13 @@ export class RemoteMCP {
     }
     const ws = this.ctx.getWebSockets("mcp").find(socket => socket.readyState === 1);
     const id = crypto.randomUUID();
+    const protocolVersion = request.headers.get("MCP-Protocol-Version");
+    const mcpHeaders: Record<string, string> = {};
+    request.headers.forEach((value, name) => {
+      if (name === "mcp-method" || name === "mcp-name" || name.startsWith("mcp-param-")) mcpHeaders[name] = value;
+    });
     if (rpc.id === undefined) {
-      if (ws) { try { ws.send(JSON.stringify({ id, request: rpc, deadline_unix_ms: Date.now() + 14_000 })); } catch { /* Notification has no reply. */ } }
+      if (ws) { try { ws.send(JSON.stringify({ id, request: rpc, protocol_version: protocolVersion ?? "", mcp_headers: mcpHeaders, deadline_unix_ms: Date.now() + 14_000 })); } catch { /* Notification has no reply. */ } }
       return new Response(null, { status: 202, headers });
     }
     if (this.pending.size >= 64) return Response.json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message: "Too many pending requests" } }, { headers });
@@ -114,7 +159,7 @@ export class RemoteMCP {
           resolve(reply);
         };
         this.pending.set(id, { ws, rpcID: rpc.id!, finish });
-        try { ws.send(JSON.stringify({ id, request: rpc, deadline_unix_ms: Date.now() + 14_000 })); } catch { finish(); }
+        try { ws.send(JSON.stringify({ id, request: rpc, protocol_version: protocolVersion ?? "", mcp_headers: mcpHeaders, deadline_unix_ms: Date.now() + 14_000 })); } catch { finish(); }
       });
     }
     if (response === undefined) {

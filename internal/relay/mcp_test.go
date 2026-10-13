@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 	"github.com/coder/websocket"
 )
 
@@ -59,7 +60,7 @@ func TestMCPTokenAndRegistration(t *testing.T) {
 			t.Fatal("bad hash body")
 		}
 	})
-	if err := c.RegisterMCPLink(context.Background(), strings.Repeat("a", 32), "link-secret"); err != nil {
+	if err := c.RegisterMCPLink(context.Background(), strings.Repeat("a", 32), "link-secret", security.MCPLinkRegistration{SecretHash: MCPTokenHash("link-secret")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.RegisterMCPToken(context.Background(), strings.Repeat("a", 32), "link-secret", hash); err != nil {
@@ -102,7 +103,7 @@ func TestMCPLinkDispatchAndHeartbeat(t *testing.T) {
 	defer cancel()
 	sock := newFakeLink()
 	l := &MCPLink{Client: fakeMCPClient(t, nil), MacID: strings.Repeat("b", 32), Secret: "private", heartbeat: 10 * time.Millisecond,
-		Dispatch: func(_ context.Context, request json.RawMessage) json.RawMessage {
+		Dispatch: func(_ context.Context, request json.RawMessage, _ http.Header) json.RawMessage {
 			if string(request) != `{"jsonrpc":"2.0","id":7,"method":"ping"}` {
 				t.Error("request changed")
 			}
@@ -193,7 +194,7 @@ func TestMCPLinkCancelsInFlightDispatchOnDisconnect(t *testing.T) {
 	ended := make(chan struct{})
 	l := &MCPLink{Client: fakeMCPClient(t, nil), MacID: strings.Repeat("e", 32), Secret: "private",
 		dial: func(context.Context, string, *websocket.DialOptions) (linkSocket, error) { return sock, nil },
-		Dispatch: func(ctx context.Context, _ json.RawMessage) json.RawMessage {
+		Dispatch: func(ctx context.Context, _ json.RawMessage, _ http.Header) json.RawMessage {
 			close(started)
 			<-ctx.Done()
 			close(ended)
@@ -228,7 +229,7 @@ func TestMCPLinkDoesNotDispatchExpiredForward(t *testing.T) {
 	var calls atomic.Int32
 	l := &MCPLink{Client: fakeMCPClient(t, nil), MacID: strings.Repeat("f", 32), Secret: "private",
 		dial: func(context.Context, string, *websocket.DialOptions) (linkSocket, error) { return sock, nil },
-		Dispatch: func(context.Context, json.RawMessage) json.RawMessage {
+		Dispatch: func(context.Context, json.RawMessage, http.Header) json.RawMessage {
 			calls.Add(1)
 			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)
 		},
@@ -250,4 +251,31 @@ func TestMCPLinkDoesNotDispatchExpiredForward(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatal("expired request dispatched")
 	}
+}
+
+func TestMCPLinkForwardsClientProtocolHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sock := newFakeLink()
+	received := make(chan http.Header, 1)
+	l := &MCPLink{Client: fakeMCPClient(t, nil), MacID: strings.Repeat("a", 32), Secret: "private",
+		dial: func(context.Context, string, *websocket.DialOptions) (linkSocket, error) { return sock, nil },
+		Dispatch: func(_ context.Context, _ json.RawMessage, headers http.Header) json.RawMessage {
+			received <- headers
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.connect(ctx) }()
+	sock.incoming <- []byte(`{"id":"headers","protocol_version":"2026-07-28","mcp_headers":{"mcp-method":"tools/call","mcp-name":"list_services","authorization":"private"},"request":{"jsonrpc":"2.0","id":1,"method":"tools/call"}}`)
+	select {
+	case headers := <-received:
+		if headers.Get("MCP-Protocol-Version") != "2026-07-28" || headers.Get("Mcp-Method") != "tools/call" || headers.Get("Mcp-Name") != "list_services" || headers.Get("Authorization") != "" {
+			t.Fatal("protocol headers changed or credential forwarded")
+		}
+	case <-ctx.Done():
+		t.Fatal("no dispatch")
+	}
+	cancel()
+	<-done
 }

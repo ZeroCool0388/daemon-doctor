@@ -54,6 +54,9 @@ type Runner struct {
 // Apply runs action for p. Unknown or unapproved actions return an error
 // and do not signal or launch. Dry-run rechecks without changing anything.
 func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dryRun bool) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	start := time.Now()
 	action = strings.TrimSpace(action)
 	if _, ok := plugins.FixAllowlist[action]; !ok {
@@ -125,6 +128,9 @@ func (r *Runner) Apply(ctx context.Context, p plugins.Plugin, action string, dry
 // ApplyStop signals an unwatched process by its exact name. It never launches.
 // The caller decides whether this name was named by a hog rule.
 func (r *Runner) ApplyStop(ctx context.Context, processName string, dryRun bool) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	start := time.Now()
 	processName = strings.TrimSpace(processName)
 	if err := ValidProcessName(processName); err != nil {
@@ -171,6 +177,9 @@ func ValidProcessName(name string) error {
 }
 
 func (r *Runner) applyKickstart(ctx context.Context, p plugins.Plugin, fix plugins.Fix, dryRun bool, start time.Time) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	target := sysprobe.GUIServiceTarget(fix.Label)
 	args := []string{"kickstart", "-k", target}
 	res := Result{
@@ -225,6 +234,9 @@ func (r *Runner) finish(ctx context.Context, p plugins.Plugin, res Result, start
 }
 
 func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscall.Signal, launch string, args []string, dryRun bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if dryRun {
 		res.WouldLaunch = launch
 		return nil
@@ -233,6 +245,9 @@ func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscal
 		return fmt.Errorf("no fix controller is configured")
 	}
 	for _, pid := range pids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if refused(pid) {
 			res.SignalError = fmt.Sprintf("refusing to signal pid %d", pid)
 			continue
@@ -242,6 +257,9 @@ func (r *Runner) signal(ctx context.Context, res *Result, pids []int, sig syscal
 		}
 	}
 	if launch != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.Control.Launch(ctx, launch, args); err != nil {
 			res.LaunchError = err.Error()
 		} else {

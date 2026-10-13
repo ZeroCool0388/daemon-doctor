@@ -3,6 +3,7 @@
 package security
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -332,18 +333,26 @@ func (s *Store) Phones() []ed25519.PublicKey {
 
 // RecordAlert remembers an alert this Mac raised.
 func (s *Store) RecordAlert(alert Raised) error {
+	return s.RecordAlertContext(context.Background(), alert)
+}
+func (s *Store) RecordAlertContext(ctx context.Context, alert Raised) error {
 	if !validID(alert.ID) {
 		return fmt.Errorf("alert id")
 	}
-	s.mu.Lock()
+	if err := LockMutexContext(ctx, &s.mu); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
-	unlock, err := s.lockState()
+	unlock, err := s.lockStateContext(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 	if _, ok := s.alerts[alert.ID]; ok {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	s.alerts[alert.ID] = alert
 	body, err := json.Marshal(alert)

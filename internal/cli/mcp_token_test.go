@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -40,6 +42,17 @@ func TestMCPTokenCommandPrintsOnceOnlyAfterRegistration(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
+		if strings.HasSuffix(r.URL.Path, "/mcp-link") {
+			public, err := base64.RawURLEncoding.DecodeString(body["public_key"])
+			if err != nil {
+				t.Error(err)
+			}
+			sig, err := base64.RawURLEncoding.DecodeString(body["signature"])
+			id := strings.Split(r.URL.Path, "/")[3]
+			if err != nil || id != security.MCPIdentityID(public) || !ed25519.Verify(public, security.MCPRegistrationMessage(id, body["public_key"], body["secret_hash"]), sig) {
+				t.Error("registration ownership proof invalid")
+			}
+		}
 		if strings.HasSuffix(r.URL.Path, "/mcp-token") {
 			registeredHash = body["token_hash"]
 		}
@@ -62,6 +75,9 @@ func TestMCPTokenCommandPrintsOnceOnlyAfterRegistration(t *testing.T) {
 	sec, err := security.Open(dir)
 	if err != nil || len(sec.Phones()) != 0 {
 		t.Fatal("unexpected pairing", err)
+	}
+	if !strings.Contains(stderr.String(), "/v1/macs/"+sec.MCPMacID()+"/mcp") {
+		t.Fatal("remote endpoint not printed")
 	}
 	out.Reset()
 	stderr.Reset()

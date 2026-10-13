@@ -118,6 +118,9 @@ func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
 }
 
 func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if hinted, ok := d.Source.(sysprobe.Hinted); ok {
 		hinted.SetHints(hintsFor(d.Plugins))
 	}
@@ -567,13 +570,13 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {
 	actions := offeredActions(a)
 	if len(actions) > 0 && d.offers != nil {
-		if err := d.offers.Mint(d.now(), security.Raised{ID: a.ID, ServiceID: a.ServiceID, ServiceName: a.ServiceName, Kind: a.Kind, Actions: actions, Process: a.Process, At: a.At}, a.Message); err != nil {
+		if err := d.offers.MintContext(ctx, d.now(), security.Raised{ID: a.ID, ServiceID: a.ServiceID, ServiceName: a.ServiceName, Kind: a.Kind, Actions: actions, Process: a.Process, At: a.At}, a.Message); err != nil {
 			return err
 		}
 	}
 	d.active[a.ID] = a
 	if d.sec != nil {
-		if err := d.sec.RecordAlert(security.Raised{
+		if err := d.sec.RecordAlertContext(ctx, security.Raised{
 			ID:          a.ID,
 			ServiceID:   a.ServiceID,
 			ServiceName: a.ServiceName,

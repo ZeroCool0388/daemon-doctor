@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 	"github.com/coder/websocket"
 )
 
@@ -33,8 +34,8 @@ func MCPTokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (c *Client) RegisterMCPLink(ctx context.Context, macID, secret string) error {
-	return c.mcpPut(ctx, macID, "mcp-link", secret, map[string]string{"secret_hash": MCPTokenHash(secret)})
+func (c *Client) RegisterMCPLink(ctx context.Context, macID, secret string, proof security.MCPLinkRegistration) error {
+	return c.mcpPut(ctx, macID, "mcp-link", secret, proof)
 }
 
 func (c *Client) RegisterMCPToken(ctx context.Context, macID, secret, hash string) error {
@@ -88,7 +89,8 @@ type linkDial func(context.Context, string, *websocket.DialOptions) (linkSocket,
 type MCPLink struct {
 	Client                        *Client
 	MacID, Secret                 string
-	Dispatch                      func(context.Context, json.RawMessage) json.RawMessage
+	Registration                  security.MCPLinkRegistration
+	Dispatch                      func(context.Context, json.RawMessage, http.Header) json.RawMessage
 	dial                          linkDial
 	heartbeat, retryMin, retryMax time.Duration
 }
@@ -105,7 +107,7 @@ func (l *MCPLink) Run(ctx context.Context, onError func(error)) {
 	for ctx.Err() == nil {
 		started := time.Now()
 		regCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		err := l.Client.RegisterMCPLink(regCtx, l.MacID, l.Secret)
+		err := l.Client.RegisterMCPLink(regCtx, l.MacID, l.Secret, l.Registration)
 		cancel()
 		if err == nil {
 			err = l.connect(ctx)
@@ -206,10 +208,12 @@ func (l *MCPLink) connect(parent context.Context) error {
 			return fmt.Errorf("invalid MCP frame")
 		}
 		var frame struct {
-			ID             string          `json:"id"`
-			Request        json.RawMessage `json:"request"`
-			Type           string          `json:"type"`
-			DeadlineUnixMS int64           `json:"deadline_unix_ms"`
+			ID              string            `json:"id"`
+			Request         json.RawMessage   `json:"request"`
+			Type            string            `json:"type"`
+			MCPHeaders      map[string]string `json:"mcp_headers"`
+			ProtocolVersion string            `json:"protocol_version"`
+			DeadlineUnixMS  int64             `json:"deadline_unix_ms"`
 		}
 		if json.Unmarshal(data, &frame) != nil {
 			continue
@@ -238,7 +242,17 @@ func (l *MCPLink) connect(parent context.Context) error {
 				deadline = remoteDeadline
 			}
 		}
-		go func(id string, request json.RawMessage, deadline time.Time) {
+		headers := make(http.Header)
+		if frame.ProtocolVersion != "" {
+			headers.Set("MCP-Protocol-Version", frame.ProtocolVersion)
+		}
+		for name, value := range frame.MCPHeaders {
+			key := strings.ToLower(name)
+			if key == "mcp-method" || key == "mcp-name" || strings.HasPrefix(key, "mcp-param-") {
+				headers.Set(name, value)
+			}
+		}
+		go func(id string, request json.RawMessage, headers http.Header, deadline time.Time) {
 			defer workers.Done()
 			defer func() { <-slots }()
 			callCtx, stop := context.WithDeadline(ctx, deadline)
@@ -246,7 +260,7 @@ func (l *MCPLink) connect(parent context.Context) error {
 			if callCtx.Err() != nil {
 				return
 			}
-			reply := l.Dispatch(callCtx, request)
+			reply := l.Dispatch(callCtx, request, headers)
 			if len(reply) == 0 || callCtx.Err() != nil {
 				return
 			}
@@ -262,6 +276,6 @@ func (l *MCPLink) connect(parent context.Context) error {
 					conn.CloseNow()
 				}
 			}
-		}(frame.ID, frame.Request, deadline)
+		}(frame.ID, frame.Request, headers, deadline)
 	}
 }

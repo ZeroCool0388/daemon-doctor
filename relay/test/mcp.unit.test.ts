@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { identity, ownerID, ownerProof } from "./mcp-identity";
 import { RemoteMCP, tokenHash } from "../src/mcp";
 
 const token = "T".repeat(43);
 const secret = "S".repeat(43);
 function request(route: string, method = "POST", auth: string | null = token, payload?: unknown): Request {
-  return new Request(`https://relay.example.invalid/v1/macs/${"a".repeat(32)}/${route}`, {
+  return new Request(`https://relay.example.invalid/v1/macs/${ownerID}/${route}`, {
     method, headers: { ...(auth ? { Authorization: `Bearer ${auth}` } : {}), "Content-Type": "application/json", "Mcp-Session-Id": "session" },
     ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
   });
@@ -15,6 +16,7 @@ function fake() {
   const storage = {
     get: async <T>(key: string) => values.get(key) as T | undefined,
     put: async (key: string, value: unknown) => { values.set(key, value); },
+    delete: async (key: string) => values.delete(key),
     transaction: async <T>(fn: (txn: unknown) => Promise<T>) => fn(storage),
   };
   const ctx = {
@@ -25,7 +27,7 @@ function fake() {
 }
 async function registered() {
   const f = fake();
-  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, { secret_hash: await tokenHash(secret) }))).status).toBe(200);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, ownerProof))).status).toBe(200);
   expect((await f.mcp.fetch("mcp-token", request("mcp-token", "PUT", secret, { token_hash: await tokenHash(token) }))).status).toBe(200);
   return f;
 }
@@ -49,7 +51,7 @@ describe("remote MCP", () => {
     const f = await registered();
     const other = "N".repeat(43);
     expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", other, { secret_hash: await tokenHash(other) }))).status).toBe(401);
-    expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, { secret_hash: await tokenHash(other) }))).status).toBe(401);
+    expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, { ...ownerProof, secret_hash: await tokenHash(other) }))).status).toBe(401);
     expect((await f.mcp.fetch("mcp-token", request("mcp-token", "PUT", secret, { token_hash: await tokenHash(other) }))).status).toBe(200);
     expect((await f.mcp.fetch("mcp", request("mcp", "POST", token, rpc("ping")))).status).toBe(401);
     expect((await f.mcp.fetch("mcp", request("mcp", "POST", other, rpc("ping")))).status).toBe(200);
@@ -143,4 +145,54 @@ describe("remote MCP", () => {
     }
     expect((await f.mcp.fetch("mcp", request("mcp", "POST", token, { ...rpc("ping"), params: "x".repeat(65_536) }))).status).toBe(400);
   });
+});
+
+it("refuses squatting, forged proofs and legacy unverified credentials", async () => {
+  const f = fake();
+  const attackerSecret = "A".repeat(43);
+  const attacker = await identity(await tokenHash(attackerSecret));
+  // Signing with the attacker's own key cannot enroll the victim's endpoint.
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", attackerSecret, attacker.proof))).status).toBe(401);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, { secret_hash: ownerProof.secret_hash }))).status).toBe(401);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, { ...ownerProof, signature: attacker.proof.signature }))).status).toBe(401);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", attackerSecret, { ...ownerProof, secret_hash: attacker.proof.secret_hash }))).status).toBe(401);
+  expect(f.values.has("mcp_link_hash")).toBe(false);
+  const wrongID = request("mcp-link", "PUT", secret, ownerProof);
+  expect((await f.mcp.fetch("mcp-link", new Request(wrongID.url.replace(ownerID, "0".repeat(32)), wrongID))).status).toBe(401);
+  // Old deployments' hash-only enrollments are not accepted as verified owners.
+  f.values.set("mcp_link_hash", ownerProof.secret_hash);
+  f.values.set("mcp_token_hash", await tokenHash(token));
+  expect((await f.mcp.fetch("mcp-token", request("mcp-token", "PUT", secret, { token_hash: await tokenHash(token) }))).status).toBe(401);
+  expect((await f.mcp.fetch("mcp", request("mcp", "POST", token, rpc("ping")))).status).toBe(401);
+  // Verified ownership can reclaim an old unsigned squatter's registration.
+  f.values.set("mcp_link_hash", attacker.proof.secret_hash);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, ownerProof))).status).toBe(200);
+  expect(f.values.get("mcp_identity_key")).toBe(ownerProof.public_key);
+  expect(f.values.get("mcp_link_hash")).toBe(ownerProof.secret_hash);
+  expect(f.values.has("mcp_token_hash")).toBe(false);
+  expect((await f.mcp.fetch("mcp-link", request("mcp-link", "PUT", secret, ownerProof))).status).toBe(200);
+});
+
+it("forwards each client's protocol header unchanged, including omission", async () => {
+  const f = await registered();
+  const frames: any[] = [];
+  const socket = { readyState: 1, send: (data: string) => {
+    const frame = JSON.parse(data);
+    frames.push(frame);
+    void f.mcp.message(socket as WebSocket, JSON.stringify({ id: frame.id, response: { jsonrpc: "2.0", id: frame.request.id, result: {} } }));
+  } } as unknown as WebSocket;
+  f.sockets.push(socket);
+  for (const version of ["2025-11-25", "2026-07-28", ""]) {
+    const req = request("mcp", "POST", token, rpc("tools/list"));
+    if (version) req.headers.set("MCP-Protocol-Version", version);
+    req.headers.set("Mcp-Method", "tools/list");
+    expect((await f.mcp.fetch("mcp", req)).status).toBe(200);
+    expect(frames.at(-1).protocol_version).toBe(version);
+    expect(frames.at(-1).mcp_headers).toEqual({ "mcp-method": "tools/list" });
+    expect(frames.at(-1).request).toEqual(rpc("tools/list"));
+    const notification = request("mcp", "POST", token, { jsonrpc: "2.0", method: "notifications/initialized" });
+    if (version) notification.headers.set("MCP-Protocol-Version", version);
+    expect((await f.mcp.fetch("mcp", notification)).status).toBe(202);
+    expect(frames.at(-1).protocol_version).toBe(version);
+  }
 });

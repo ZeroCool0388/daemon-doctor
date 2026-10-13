@@ -2,6 +2,7 @@
 package offers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,7 +64,12 @@ func PrivateDir(dir string) error {
 
 // transaction refreshes disk state only after obtaining the cross-process lock.
 func (s *Store) transaction(fn func() error) error {
-	s.mu.Lock()
+	return s.transactionContext(context.Background(), fn)
+}
+func (s *Store) transactionContext(ctx context.Context, fn func() error) error {
+	if err := security.LockMutexContext(ctx, &s.mu); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	if s.dir == "" {
 		return fn()
@@ -73,7 +79,7 @@ func (s *Store) transaction(fn func() error) error {
 		return err
 	}
 	defer f.Close()
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err = security.LockFileContext(ctx, int(f.Fd())); err != nil {
 		return err
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
@@ -86,6 +92,9 @@ func (s *Store) transaction(fn func() error) error {
 		if err = json.Unmarshal(data, &s.items); err != nil {
 			return fmt.Errorf("read offers: %w", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return fn()
 }
@@ -125,7 +134,10 @@ func (s *Store) save() error {
 }
 
 func (s *Store) Mint(now time.Time, alert security.Raised, message string) error {
-	return s.transaction(func() error {
+	return s.MintContext(context.Background(), now, alert, message)
+}
+func (s *Store) MintContext(ctx context.Context, now time.Time, alert security.Raised, message string) error {
+	return s.transactionContext(ctx, func() error {
 		for id, o := range s.items {
 			if !now.Before(o.ExpiresAt) {
 				delete(s.items, id)
@@ -140,8 +152,11 @@ func (s *Store) Mint(now time.Time, alert security.Raised, message string) error
 }
 
 func (s *Store) List(now time.Time) ([]Offer, error) {
+	return s.ListContext(context.Background(), now)
+}
+func (s *Store) ListContext(ctx context.Context, now time.Time) ([]Offer, error) {
 	out := []Offer{}
-	err := s.transaction(func() error {
+	err := s.transactionContext(ctx, func() error {
 		for _, o := range s.items {
 			if !o.Consumed && now.Before(o.ExpiresAt) {
 				out = append(out, o)
@@ -156,8 +171,11 @@ func (s *Store) List(now time.Time) ([]Offer, error) {
 // Consume persists the burn before returning. All actions for the same incident
 // are burned together, including when execution later fails or is cancelled.
 func (s *Store) Consume(now time.Time, id string, validate func(Offer) error) (Offer, error) {
+	return s.ConsumeContext(context.Background(), now, id, validate)
+}
+func (s *Store) ConsumeContext(ctx context.Context, now time.Time, id string, validate func(Offer) error) (Offer, error) {
 	var out Offer
-	err := s.transaction(func() error {
+	err := s.transactionContext(ctx, func() error {
 		o, ok := s.items[id]
 		if !ok {
 			return fmt.Errorf("unknown fix offer")

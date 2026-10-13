@@ -1,6 +1,8 @@
 package offers
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -158,5 +161,34 @@ func TestCrossProcessConsume(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Fatalf("cross-process consumes: %d", wins)
+	}
+}
+
+func TestOfferContextCancelsCrossProcessLockWait(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "control")
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, "offers.lock"), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := store.ListContext(ctx, time.Now()); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Error(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("offer file lock hung request")
 	}
 }

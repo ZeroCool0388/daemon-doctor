@@ -1,14 +1,15 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { identity, ownerID, ownerProof } from "./mcp-identity";
 import { tokenHash } from "../src/mcp";
 
-const macID = "d".repeat(32);
+const macID = ownerID;
 const origin = `https://relay.example.invalid/v1/macs/${macID}`;
 const secret = "S".repeat(43);
 const token = "T".repeat(43);
 async function setup() {
   for (const [route, body] of [
-    ["mcp-link", { secret_hash: await tokenHash(secret) }],
+    ["mcp-link", ownerProof],
     ["mcp-token", { token_hash: await tokenHash(token) }],
   ] as const) {
     const res = await SELF.fetch(`${origin}/${route}`, { method: "PUT", headers: { Authorization: `Bearer ${secret}` }, body: JSON.stringify(body) });
@@ -49,9 +50,10 @@ describe("remote MCP Worker and Durable Object", () => {
   });
 
   it("reports last_seen for an offline Mac", async () => {
-    const id = "e".repeat(32);
+    const owner = await identity(await tokenHash(secret));
+    const id = owner.id;
     const base = `https://relay.example.invalid/v1/macs/${id}`;
-    await SELF.fetch(`${base}/mcp-link`, { method: "PUT", headers: { Authorization: `Bearer ${secret}` }, body: JSON.stringify({ secret_hash: await tokenHash(secret) }) });
+    await SELF.fetch(`${base}/mcp-link`, { method: "PUT", headers: { Authorization: `Bearer ${secret}` }, body: JSON.stringify(owner.proof) });
     await SELF.fetch(`${base}/mcp-token`, { method: "PUT", headers: { Authorization: `Bearer ${secret}` }, body: JSON.stringify({ token_hash: await tokenHash(token) }) });
     const res = await SELF.fetch(`${base}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: "call", method: "tools/call" }) });
     expect(await res.json()).toEqual({ jsonrpc: "2.0", id: "call", result: { isError: true, content: [{ type: "text", text: "Mac unreachable, last seen never" }] } });

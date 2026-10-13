@@ -68,8 +68,8 @@ daemon-doctor run --config ~/.config/daemon-doctor/config.yaml
 
 `mcp-token` creates the Mac identity if needed, registers a new token's SHA-256
 hash with the relay and prints the token once. It does not save the token.
-Use the `mac_id` from `identity.json` in the configured state directory to set
-the client's Streamable HTTP URL:
+The command writes the Streamable HTTP URL to stderr. Use that URL and the
+printed token in the client:
 
 ```text
 https://your-relay.example.workers.dev/v1/macs/<mac_id>/mcp
@@ -79,7 +79,9 @@ Authorization: Bearer <token>
 The endpoint accepts JSON-RPC over POST and returns JSON. It supports
 `initialize`, `notifications/initialized`, `ping`, `tools/list` and
 `tools/call`; GET returns 405. A supplied `Mcp-Session-Id` is echoed, but
-requests are sessionless. Requests and link responses are bounded to 64 KiB.
+requests are sessionless. The client's MCP protocol version and standard MCP
+headers are forwarded to the Mac. Requests and link responses are bounded
+to 64 KiB.
 The daemon sends a heartbeat every 30 seconds and reconnects with backoff.
 Calls wait up to 15 seconds; an offline or unresponsive Mac returns
 `Mac unreachable, last seen <ISO time>` (or `never` before the first link).
@@ -91,13 +93,17 @@ again; the previous token stops authorising new requests. Remote live fixes
 require `control.allow_fixes: true` and a client that asks for explicit human
 approval for each exact offer. Tool annotations do not enforce that approval.
 Single-use offers, the allowlist, fresh checks and repeated-failure lockout
-remain enforced by the Mac. A timed-out fix may have started: inspect status
-and recent events before proceeding.
+remain enforced by the Mac. Backend calls use the link request deadline,
+including time spent waiting for daemon state locks. Cancellation stops further fix steps; signals already sent
+cannot be undone. Inspect status and recent events after a timeout.
 
 The Mac stores its separate link secret in `mcp-link.secret` with mode 0600;
-the relay stores only its hash and the client token hash. First link
-registration claims an unregistered random Mac id, so register the link before
-sharing that id. Subsequent registrations must use the existing link secret.
+the relay stores credential hashes and the Mac public key. Link registration
+requires an Ed25519 signature from the Mac's existing identity key, binding the
+remote endpoint id and link-secret hash. The remote id derives from that public
+key; the phone-pairing id stays unchanged. Subsequent registrations also require
+the existing link secret. Hash-only registrations from older versions are
+refused; run `mcp-token` again and update the client's URL and token.
 The relay authenticates access but can read requests and results; it remains
 a trusted component for remote MCP and can forward fix requests. Phone pairing
 secrets and signed phone approvals remain separate.
