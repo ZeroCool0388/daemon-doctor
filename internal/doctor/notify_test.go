@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
 	"github.com/ZeroCool0388/daemon-doctor/internal/notify"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
@@ -134,6 +135,64 @@ func TestNtfyMemoryHogAlertsOnceAndRecovers(t *testing.T) {
 	cycle()
 	if events := sent(); len(events) != 0 {
 		t.Fatal("memory all-clear repeated")
+	}
+}
+
+func TestNtfyMemoryHogQueuesDespiteLogFailure(t *testing.T) {
+	host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	book, err := logbook.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { book.Close() })
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host, loadExample(t)}, src, nil, book, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := captureNotifications(t, d)
+	snap := running(2)
+	snap.Host = sysprobe.Host{MemoryPressureKnown: true, MemoryPressure: "warn"}
+	snap.Processes[0].MemoryKnown = true
+	snap.Processes[0].MemoryBytes = 1 << 30
+	src.Set(snap)
+	if _, err := d.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if events := sent(); len(events) != 0 {
+		t.Fatal("memory pressure notified before the sustained threshold")
+	}
+	// The one-shot memory alert must survive a failure to append it to the log.
+	if err := book.Close(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := d.Cycle(context.Background()); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("expected a closed-log failure, got %v", err)
+	}
+	want := "Example Desktop App is the largest memory user, and memory pressure has stayed at warning for 6 minutes."
+	if events := sent(); len(events) != 1 || events[0].State != "alert" || events[0].Message != want {
+		t.Fatalf("expected the machine alert despite the log failure, got %+v", events)
+	}
+	book, err = logbook.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Log = book
+	rows, err := d.Cycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows[0].Alerts) != 0 {
+		t.Fatal("machine rule repeated its one-shot alert")
+	}
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("persistent incident notified again after logging recovered: %+v", events)
 	}
 }
 

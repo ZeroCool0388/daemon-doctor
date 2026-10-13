@@ -170,6 +170,8 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 		samples = append(samples, rules.Sample{Plugin: row.plugin, Outcomes: row.outcomes})
 	}
 	machine := d.Rules.DecideMachine(d.now(), snap, samples)
+	// Queue one-shot transitions before logging or offer persistence can fail.
+	d.queueMachineNotifications(machine)
 	d.held = machine.Hold
 
 	out := make([]ServiceStatus, 0, len(rows))
@@ -217,7 +219,6 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 			d.queueNotification(row)
 		}
 	}
-	d.queueMachineNotifications(machine)
 	d.latest = out
 	d.sampledAt = d.now()
 	d.pruneAlerts()
