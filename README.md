@@ -4,7 +4,8 @@
 
 **A small watchdog for the apps and background services on your Mac.** It detects failures, explains them in plain English, and runs a locally allowlisted fix after a signed phone approval or local confirmation. Local MCP tools let an LLM client inspect health and request a configured fix.
 
-Fixed rules, one Go binary, one plug-in file per service. The Mac runs as the normal user and connects outward to a relay mailbox; it opens no inbound ports.
+Fixed rules, one Go binary, one plug-in file per service. The Mac runs as the normal user and connects outward to ntfy for phone alerts
+and to an optional relay mailbox; it opens no inbound ports.
 
 ## The problem
 
@@ -33,6 +34,17 @@ Scene 1. Example Desktop App is stuck, then force-restarted.
 ```
 
 The replay also covers network recovery, an unwatched CPU hog and repeated failures. It uses fictional services and a scripted clock, with no accounts, keys, config or network. The Android app also starts in demo mode.
+
+## Phone alerts
+
+**ntfy is the recommended phone alert.** Enable it with
+`daemon-doctor ntfy-setup`, then subscribe to the printed link in the
+[ntfy phone app](https://docs.ntfy.sh/subscribe/phone/) or browser. It sends a
+short notice when a watched service becomes Down or Stuck and one when it
+recovers. An unchanged condition produces no repeated notices.
+
+ntfy runs independently of the relay and phone pairing. The Daemon Doctor
+Android app remains an optional extra for service views and signed fix approvals.
 
 ## Use with Cursor, Codex or Claude
 
@@ -128,7 +140,11 @@ flowchart LR
     F --> L
   end
   W[Worker relay mailbox]
-  Ph[Android app]
+  Ph[Optional Android app]
+  N[ntfy server]
+  Phone[Phone or browser]
+  R -- outbound HTTPS state change --> N
+  N -- push notice --> Phone
   R -- outbound HTTPS alert --> W
   Ph -- signed approval --> W
   W -- polled approval --> V
@@ -138,7 +154,8 @@ flowchart LR
 
 - **Mac:** checks on the configured interval, logs locally with secret-looking values blanked, and polls for pairing messages and approvals every five seconds as well as after check cycles.
 - **Relay:** a Cloudflare Worker with a SQLite-backed Durable Object per Mac id. It stores `pairing`, `alerts`, `approvals` and `results`; pages are capped at 100 records. It does not verify approvals or run commands.
-- **Android:** shows alerts, service status and history, and signs approvals. It polls every 15 seconds while its process runs. The relay's push delivery is still a stub.
+- **ntfy:** recommended for phone alerts. The daemon makes one bounded delivery attempt per confirmed Down, Stuck or recovery transition. Sending runs separately from monitoring; the topic stays in the local config.
+- **Android (optional):** shows alerts, service status and history, and signs approvals. It polls every 15 seconds while its process runs. The relay's push delivery is still a stub.
 
 ### Plug-ins and fixes
 
@@ -216,7 +233,36 @@ cp plugins/this-mac.yaml plugins/syncthing.yaml ~/.config/daemon-doctor/plugins/
 
 Copy only plug-ins for services you run, and configure their fixes. `plugins_dir` is resolved relative to the config file. Keep the real config and keys outside the checkout.
 
-### 2. Deploy the relay
+### 2. Set up ntfy phone alerts
+
+Keep the config outside a Git checkout, then run:
+
+```sh
+~/bin/daemon-doctor ntfy-setup
+```
+
+Use `--config path` for a different local YAML or TOML config. The command
+creates a 256-bit random topic, enables notifications, saves the config with
+mode 0600 and prints the subscribe link. Subscribe to that link in ntfy, then
+run the daemon. Setup itself sends no notification.
+
+The local config block is `notify.ntfy`, with `server`, `topic` and `enabled`.
+`server` defaults to `https://ntfy.sh`; `enabled` defaults to false. The example
+config leaves the topic empty. A self-hosted ntfy server can use its own HTTPS
+origin. Running setup again generates a new topic and subscribe link.
+
+Keep the topic and subscribe link private and outside version control. On an
+unrestricted ntfy server, knowing the topic permits reading and publishing
+notices. The server can read the notification text, including service names.
+See [ntfy's publishing and topic guidance](https://docs.ntfy.sh/publish/).
+
+Debouncing lasts for the daemon run. Paused or transitional readings do not
+produce recovery notices; recovery requires a healthy sample. Failed deliveries
+are logged without the topic and are not retried on every unchanged sample.
+The delivery queue and HTTP timeout are bounded; successful phone delivery
+still depends on the ntfy server, network and subscription settings.
+
+### 3. Deploy the optional relay
 
 From `relay/`:
 
@@ -239,15 +285,16 @@ relay:
   url: https://your-relay.example.workers.dev
 ```
 
-Use an origin without a path, query or credentials. Leaving `relay.url` unset keeps alerts local.
+Use an origin without a path, query or credentials. Leave `relay.url` unset when using ntfy alone. The relay supports the optional
+Android app and remote MCP.
 
-### 3. Install the Android app
+### 4. Install the optional Android app
 
 The [Android APK workflow](.github/workflows/android-apk.yml) builds on pushes to `main` and uploads the `daemon-doctor-debug-apk` artifact containing an APK and its `.sha256` file. Pushes of `v*` tags also attach those files to the corresponding [release](https://github.com/ZeroCool0388/daemon-doctor/releases). Download the artifact from a completed [workflow run](https://github.com/ZeroCool0388/daemon-doctor/actions/workflows/android-apk.yml), or use a tagged release asset, and open the APK on your phone to sideload it.
 
 CI builds use fresh debug signing keys. Installing a newer CI build over an older one requires uninstalling the older app first, which removes its saved pairing. To build locally, run `./gradlew :app:assembleDebug` in `android/`; the output is `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-### 4. Pair the phone
+### 5. Pair the optional Android app
 
 ```sh
 ~/bin/daemon-doctor pair --out pairing.png
@@ -257,7 +304,7 @@ CI builds use fresh debug signing keys. Installing a newer CI build over an olde
 
 The Mac private key stays in the state directory with mode 0600. The phone uses Android Keystore when Ed25519 is available, otherwise an app-private signing seed.
 
-### 5. Run at login
+### 6. Run at login
 
 Replace the binary and config paths in `launchd/com.example.daemon-doctor.plist`, then install it as the normal user:
 
@@ -288,13 +335,14 @@ The program and app use free dependencies, and the relay is designed for the Wor
 
 ## Limits and next steps
 
-- Phone alerts rely on polling while the app process runs; relay push delivery still needs wiring.
+- ntfy provides the recommended push notices. The optional Android app still relies on polling while its process runs; relay push delivery remains a stub.
 - The Android app does not display the relay's fix results yet. Use the local log to inspect the action and recheck.
 - Alerts are not encrypted end to end. The QR secret and private signing keys stay off the relay.
 - Failed deliveries retry in memory and are lost if the Mac process exits. Retry work and request timeouts are bounded to keep monitoring responsive.
 - The repository's tests do not establish camera scanning, Keystore support or the complete Mac-to-phone flow on a physical device.
 
-Next: validate the complete flow on a Mac and Android phone, measure end-to-end latency, and connect push delivery. An iPhone app comes later.
+Next: validate ntfy delivery and the optional signed-approval flow on physical
+devices, and measure end-to-end latency. An iPhone app comes later.
 
 ## License
 

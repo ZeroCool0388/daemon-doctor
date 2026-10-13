@@ -12,6 +12,7 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/checks"
 	"github.com/ZeroCool0388/daemon-doctor/internal/fixes"
 	"github.com/ZeroCool0388/daemon-doctor/internal/logbook"
+	"github.com/ZeroCool0388/daemon-doctor/internal/notify"
 	"github.com/ZeroCool0388/daemon-doctor/internal/offers"
 	"github.com/ZeroCool0388/daemon-doctor/internal/plugins"
 	"github.com/ZeroCool0388/daemon-doctor/internal/relay"
@@ -38,19 +39,22 @@ type Doctor struct {
 	Fixes   *fixes.Runner
 	Log     *logbook.Book
 
-	mu          stateMutex
-	offers      *offers.Store
-	active      map[string]rules.Alert
-	latest      []ServiceStatus
-	held        bool
-	sampledAt   time.Time
-	fixSource   string
-	now         func() time.Time
-	sec         *security.Store
-	relay       *relay.Client
-	outbox      []outgoing
-	lastStatus  map[string]string
-	lastSummary time.Time
+	mu            stateMutex
+	offers        *offers.Store
+	active        map[string]rules.Alert
+	latest        []ServiceStatus
+	held          bool
+	sampledAt     time.Time
+	fixSource     string
+	now           func() time.Time
+	sec           *security.Store
+	relay         *relay.Client
+	outbox        []outgoing
+	lastStatus    map[string]string
+	lastSummary   time.Time
+	notifier      notify.Sender
+	notifications chan notify.Event
+	notifyStates  map[string]string
 }
 
 type outgoing struct {
@@ -200,6 +204,11 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 	if err := d.logSummary(out); err != nil {
 		return nil, err
 	}
+	for _, row := range out {
+		if p, ok := d.find(row.ID); ok && !p.Host {
+			d.queueNotification(row)
+		}
+	}
 	d.latest = out
 	d.sampledAt = d.now()
 	d.pruneAlerts()
@@ -232,6 +241,8 @@ func (d *Doctor) Run(ctx context.Context, interval time.Duration, onCycle func([
 	if interval <= 0 {
 		return fmt.Errorf("interval must be positive")
 	}
+	stopNotifications := d.startNotifications(ctx)
+	defer stopNotifications()
 	tick := func() {
 		if ctx.Err() != nil {
 			return
@@ -310,6 +321,9 @@ func (d *Doctor) applyFix(ctx context.Context, serviceID, action string, dryRun 
 	verdict := d.Rules.Decide(p, res.Outcomes)
 	if logErr := d.logCheck(p, res.Outcomes, verdict); logErr != nil {
 		return res, logErr
+	}
+	if !p.Host {
+		d.queueNotification(ServiceStatus{ID: p.ID, Name: p.Name, Status: verdict.Status})
 	}
 	for _, alert := range verdict.Alerts {
 		if logErr := d.logAlert(alert); logErr != nil {
