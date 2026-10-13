@@ -280,7 +280,7 @@ func TestRelaunchChecksLifetimeAgainBeforeEachKill(t *testing.T) {
 	}
 }
 
-func TestSurvivingOriginalRequiresKnownMatchingStartTime(t *testing.T) {
+func TestSurvivingOriginalKeepsUnverifiedPIDPresent(t *testing.T) {
 	initial := flaggedTree(false)
 	original := processIdentities(initial, []int{4, 6})
 	replacement := flaggedTree(false)
@@ -290,8 +290,56 @@ func TestSurvivingOriginalRequiresKnownMatchingStartTime(t *testing.T) {
 		t.Fatalf("PID reuse classified as survival: %+v", alive)
 	}
 	replacement.Processes[1].StartTime = 0
-	if alive := survivingOriginal(replacement, original); len(alive) != 0 {
-		t.Fatalf("unknown lifetime classified as survival: %+v", alive)
+	if alive := survivingOriginal(replacement, original); len(alive) != 1 || alive[6].StartTime != 0 {
+		t.Fatalf("unverified tracked PID treated as exited: %+v", alive)
+	}
+	original[6] = replacement.Processes[1]
+	replacement.Processes[1].StartTime = 1001
+	if alive := survivingOriginal(replacement, original); len(alive) != 1 || alive[6].StartTime != 1001 {
+		t.Fatalf("unknown original lifetime treated as exited: %+v", alive)
+	}
+}
+
+func TestRelaunchWaitsThenAbortsForUnverifiedTrackedPID(t *testing.T) {
+	for _, scenario := range []string{"child-start-lost", "child-start-never-known", "app-start-lost-unmatched"} {
+		t.Run(scenario, func(t *testing.T) {
+			initial := flaggedTree(false)
+			if scenario == "child-start-never-known" {
+				initial.Processes[1].StartTime = 0
+			}
+			src := &sysprobe.MemSource{}
+			src.Set(initial)
+			var deadline time.Time
+			ctrl := &relaunchCtrl{launch: func() error { return errors.New("unexpected launcher") }}
+			ctrl.quit = func(ctx context.Context) error {
+				deadline, _ = ctx.Deadline()
+				remaining := flaggedTree(false)
+				if scenario == "app-start-lost-unmatched" {
+					remaining.Processes = remaining.Processes[:1]
+					remaining.Processes[0].Name, remaining.Processes[0].Exe, remaining.Processes[0].Cmd = "unknown", "", ""
+					remaining.Processes[0].StartTime = 0
+				} else {
+					// The app exited, but its tracked child is still present.
+					remaining.Processes = remaining.Processes[1:]
+					remaining.Processes[0].PPID = 1
+					if scenario == "child-start-lost" {
+						remaining.Processes[0].StartTime = 0
+					}
+				}
+				src.Set(remaining)
+				return nil
+			}
+			res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+			if err == nil || !strings.Contains(err.Error(), "cannot verify original lifetime") || res.Fixed {
+				t.Fatalf("unverified PID did not abort: %+v %v", res, err)
+			}
+			if time.Now().Before(deadline) {
+				t.Fatal("unverified PID did not keep the exit wait active")
+			}
+			if len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
+				t.Fatalf("unverified PID killed or launcher run: %+v", ctrl)
+			}
+		})
 	}
 }
 

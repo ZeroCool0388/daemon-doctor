@@ -236,7 +236,10 @@ func survivingOriginal(snap sysprobe.Snapshot, original map[int]sysprobe.Process
 	out := map[int]sysprobe.Process{}
 	for _, proc := range snap.Processes {
 		old, ok := original[proc.PID]
-		if ok && sameProcess(old, proc) {
+		// An unavailable start time cannot prove that a tracked process exited.
+		// Keep waiting on the PID; the separate sameProcess checks before KILL
+		// still require a known, matching lifetime.
+		if ok && (old.StartTime == 0 || proc.StartTime == 0 || sameProcess(old, proc)) {
 			out[proc.PID] = proc
 		}
 	}
