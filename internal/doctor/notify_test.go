@@ -205,7 +205,6 @@ func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 		{"unwatched CPU", rules.KindCPUHog, false},
 		{"unwatched memory", rules.KindMemoryHog, false},
 		{"low disk", rules.KindDiskLow, false},
-		{"network down", rules.KindNetworkDown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
@@ -252,8 +251,6 @@ func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 					snap.Processes[index].MemoryBytes = 1 << 30
 				case rules.KindDiskLow:
 					snap.Host.DiskFreePercent = 9
-				case rules.KindNetworkDown:
-					snap.Host.NetworkUp = false
 				}
 				rows := cycle()
 				if tc.kind == rules.KindCPUHog || tc.kind == rules.KindMemoryHog {
@@ -298,6 +295,107 @@ func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNtfyNetworkOutageNotifiesOnlyAfterRecovery(t *testing.T) {
+	host, err := plugins.LoadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &sysprobe.MemSource{}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	d, err := New([]plugins.Plugin{host}, src, nil, nil, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := captureNotifications(t, d)
+	snap := running(2)
+	snap.Processes[0].CPUKnown = true
+	snap.Host = sysprobe.Host{
+		SleepKnown: true, NetworkKnown: true, NetworkUp: true,
+		DiskKnown: true, DiskFreePercent: 40,
+		MemoryPressureKnown: true, MemoryPressure: "normal",
+	}
+	cycle := func() []ServiceStatus {
+		t.Helper()
+		src.Set(snap)
+		rows, err := d.Cycle(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("initial network health sent a notification: %+v", events)
+	}
+	for range 2 {
+		lostAt := now
+		snap.Host.NetworkUp = false
+		rows := cycle()
+		if len(rows[0].Alerts) != 1 || rows[0].Alerts[0].Kind != rules.KindNetworkDown {
+			t.Fatalf("expected network_down rule alert, got %+v", rows[0])
+		}
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("attempted a phone notification without a network route: %+v", events)
+		}
+		now = now.Add(2 * time.Minute)
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("repeated outage attempted a phone notification: %+v", events)
+		}
+		snap.Host.NetworkKnown = false
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("unknown network reading sent a recovery: %+v", events)
+		}
+		// Network-back is deferred while the machine is asleep.
+		snap.Host.NetworkKnown, snap.Host.NetworkUp, snap.Host.Asleep = true, true, true
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("recovery sent before network_back: %+v", events)
+		}
+		now = now.Add(4 * time.Minute)
+		snap.Host.Asleep = false
+		rows = cycle()
+		var back rules.Alert
+		for _, alert := range rows[0].Alerts {
+			if alert.Kind == rules.KindNetworkBack {
+				back = alert
+			}
+		}
+		if back.Message == "" {
+			t.Fatal("missing network_back rule alert")
+		}
+		want := "Network connection was lost at " + lostAt.UTC().Format("15:04 UTC on 2 Jan 2006") + " and is now back. " + back.Message
+		if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != want {
+			t.Fatalf("expected one outage-and-recovery notification, got %+v", events)
+		}
+		cycle()
+		if events := sent(); len(events) != 0 {
+			t.Fatalf("network recovery repeated: %+v", events)
+		}
+		now = now.Add(time.Hour)
+	}
+}
+
+func TestNtfyNetworkRecoveryWithoutOutageTime(t *testing.T) {
+	d, _, _, _ := offerDoctor(t)
+	sent := captureNotifications(t, d)
+	back := rules.MachineVerdict{Alerts: []rules.Alert{{Kind: rules.KindNetworkBack, Message: "The network is back."}}}
+	d.queueMachineNotifications(back)
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("unmatched network_back sent a confusing all-clear: %+v", events)
+	}
+	d.queueMachineNotifications(rules.MachineVerdict{Alerts: []rules.Alert{{Kind: rules.KindNetworkDown}}})
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("network_down attempted delivery: %+v", events)
+	}
+	d.queueMachineNotifications(back)
+	want := "Network connection was lost and is now back. The network is back."
+	if events := sent(); len(events) != 1 || events[0].Message != want {
+		t.Fatalf("expected outage context without a fabricated timestamp, got %+v", events)
 	}
 }
 

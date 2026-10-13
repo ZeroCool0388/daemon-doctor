@@ -71,8 +71,22 @@ func (d *Doctor) queueMachineNotifications(verdict rules.MachineVerdict) {
 		kind := strings.TrimSuffix(alert.Kind, "_unwatched")
 		switch kind {
 		case rules.KindNetworkBack:
-			clear(rules.KindNetworkDown, "Network connection is back to normal. "+alert.Message)
-		case rules.KindCPUHog, rules.KindMemoryHog, rules.KindDiskLow, rules.KindNetworkDown:
+			outage, active := d.notifyMachine[rules.KindNetworkDown]
+			if !active {
+				continue
+			}
+			message := "Network connection was lost and is now back. "
+			if !outage.At.IsZero() {
+				message = "Network connection was lost at " + outage.At.UTC().Format("15:04 UTC on 2 Jan 2006") + " and is now back. "
+			}
+			clear(rules.KindNetworkDown, message+alert.Message)
+		case rules.KindNetworkDown:
+			// No default route means delivery will fail. Remember the outage
+			// and report both the loss and recovery when the network is back.
+			if _, active := d.notifyMachine[kind]; !active {
+				d.notifyMachine[kind] = alert
+			}
+		case rules.KindCPUHog, rules.KindMemoryHog, rules.KindDiskLow:
 			if _, active := d.notifyMachine[kind]; active {
 				continue
 			}
