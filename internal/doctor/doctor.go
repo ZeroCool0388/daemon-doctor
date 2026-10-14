@@ -574,7 +574,14 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 		_ = d.logRefusal(approval.AlertID, err)
 		return fixes.Result{}, err
 	}
-	raised, err := d.sec.Consume(d.now(), approval)
+	raised, err := d.sec.ConsumeIf(d.now(), approval, func(raised security.Raised) error {
+		if raised.Kind != rules.KindMemoryHog {
+			return nil
+		}
+		// Validate the same live memory eligibility as local offers before
+		// consuming the nonce, including the preapproved unwatched stop path.
+		return d.offerValid(offers.Offer{AlertID: raised.ID, ServiceID: raised.ServiceID, FixID: approval.FixID})
+	})
 	if err != nil {
 		_ = d.logRefusal(approval.AlertID, err)
 		return fixes.Result{}, err

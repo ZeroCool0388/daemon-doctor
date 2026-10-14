@@ -375,14 +375,21 @@ func Sign(private ed25519.PrivateKey, approval Approval) (Approval, error) {
 // Consume checks an approval and records its nonce.
 // A second call with the same nonce is a replay.
 func (s *Store) Consume(now time.Time, approval Approval) (Raised, error) {
-	raised, err := s.check(now, approval)
+	return s.ConsumeIf(now, approval, nil)
+}
+
+// ConsumeIf verifies an approval, then checks live eligibility before recording
+// its nonce. A validation error leaves the approval available for retry.
+// validate runs under the store lock and must not call back into this store.
+func (s *Store) ConsumeIf(now time.Time, approval Approval, validate func(Raised) error) (Raised, error) {
+	raised, err := s.check(now, approval, validate)
 	if err != nil {
 		return Raised{}, err
 	}
 	return raised, nil
 }
 
-func (s *Store) check(now time.Time, approval Approval) (Raised, error) {
+func (s *Store) check(now time.Time, approval Approval, validate func(Raised) error) (Raised, error) {
 	if err := canonicalOK(approval); err != nil {
 		return Raised{}, err
 	}
@@ -418,11 +425,16 @@ func (s *Store) check(now time.Time, approval Approval) (Raised, error) {
 	if _, used := s.nonces[approval.Nonce]; used {
 		return Raised{}, &Refusal{Reason: ReasonReplay, Detail: "approval was already used"}
 	}
+	raised.Actions = []string{approval.FixID}
+	if validate != nil {
+		if err := validate(raised); err != nil {
+			return Raised{}, err
+		}
+	}
 	if err := appendLine(filepath.Join(s.dir, "nonces.jsonl"), []byte(approval.Nonce)); err != nil {
 		return Raised{}, err
 	}
 	s.nonces[approval.Nonce] = struct{}{}
-	raised.Actions = []string{approval.FixID}
 	return raised, nil
 }
 
