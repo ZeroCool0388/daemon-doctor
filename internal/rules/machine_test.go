@@ -509,31 +509,41 @@ func TestMemoryPressureFixesStayWithTheAlertedProcess(t *testing.T) {
 				t.Fatalf("expected a memory alert: %+v", got)
 			}
 			alert := got.Alerts[0]
-			if !eng.AlertActive(alert) || eng.StopAllowed(proc.Name) == watched {
+			if !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
 				t.Fatal("named process did not receive the expected fix permissions")
 			}
 			// A brief dip keeps the incident, but a process fix is no longer needed.
 			got = observe(6, "normal", proc)
-			if slices.Contains(got.Normal, KindMemoryHog) || eng.AlertActive(alert) || eng.StopAllowed(proc.Name) {
+			if slices.Contains(got.Normal, KindMemoryHog) || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
 				t.Fatalf("brief dip cleared the incident or retained a stale fix: %+v", got)
 			}
 			got = observe(7, "warn", proc)
-			if len(got.Alerts) != 0 || !eng.AlertActive(alert) {
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || !eng.FixEligible(alert) {
 				t.Fatalf("returning pressure repeated the alert or lost its current target: %+v", got)
 			}
 			other := sysprobe.Process{PID: 10, Name: "OtherTool", MemoryKnown: true, MemoryBytes: 90}
 			got = observe(8, "warn", proc, other)
-			if len(got.Alerts) != 0 || eng.AlertActive(alert) || eng.StopAllowed(proc.Name) || eng.StopAllowed(other.Name) {
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) || eng.StopAllowed(other.Name) {
 				t.Fatalf("changing the top process repeated the alert or granted a stale/unoffered fix: %+v", got)
 			}
 			got = observe(9, "warn")
-			if len(got.Alerts) != 0 || eng.AlertActive(alert) || eng.StopAllowed(proc.Name) {
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
 				t.Fatalf("missing process retained a process permission: %+v", got)
 			}
 			proc.PID++ // A replacement with the same name is not the alerted process.
 			got = observe(10, "warn", proc)
-			if len(got.Alerts) != 0 || eng.AlertActive(alert) || eng.StopAllowed(proc.Name) {
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
 				t.Fatalf("replacement process inherited the previous alert's permission: %+v", got)
+			}
+			proc.PID--
+			got = observe(11, "warn", proc)
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
+				t.Fatalf("original process did not regain its offer without repeating the alert: %+v", got)
+			}
+			observe(12, "normal", proc)
+			observe(15, "normal", proc)
+			if eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
+				t.Fatal("memory recovery retained the incident or its fix permissions")
 			}
 		})
 	}

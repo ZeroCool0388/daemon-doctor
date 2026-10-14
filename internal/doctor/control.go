@@ -95,6 +95,9 @@ func (d *Doctor) offerValid(o offers.Offer) error {
 	if !ok || d.held || !d.Rules.AlertActive(a) {
 		return fmt.Errorf("fix offer is no longer active or fixes are paused")
 	}
+	if !d.Rules.FixEligible(a) {
+		return fmt.Errorf("fix is temporarily unavailable for this alert")
+	}
 	if a.ServiceID != o.ServiceID {
 		return fmt.Errorf("offer service mismatch")
 	}
