@@ -129,6 +129,7 @@ type memoryWatch struct {
 	recovering  bool
 	belowSince  time.Time
 	fixEligible bool
+	serviceID   string
 }
 
 func (e *Engine) machine() *machineState {
@@ -292,10 +293,21 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 		w.since = now
 	}
 	top, found := sysprobe.TopMemory(snap)
+	watched, service := watchedPlugin(samples, top)
+	serviceID := UnwatchedID
+	if watched {
+		serviceID = service.ID
+	}
 	if w.active {
-		watched, _ := watchedPlugin(samples, top)
-		w.fixEligible = found && w.pid == top.PID && w.name == sysprobe.DisplayName(top) && w.watched == watched
+		w.fixEligible = found && w.pid == top.PID && w.name == sysprobe.DisplayName(top) && w.serviceID == serviceID
 		return nil, false
+	}
+	// Keep the current above-threshold attribution even before the duration
+	// elapses, for validating a saved incident in a standalone approval command.
+	w.fixEligible = found
+	w.pid, w.name, w.watched, w.serviceID = 0, "", false, ""
+	if found {
+		w.pid, w.name, w.watched, w.serviceID = top.PID, sysprobe.DisplayName(top), watched, serviceID
 	}
 	if now.Sub(w.since) < dur {
 		return nil, false
@@ -311,9 +323,6 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 			Message: fill("Memory pressure has stayed at {level} for {duration}.", fields),
 		}}, false
 	}
-	w.pid, w.name = top.PID, sysprobe.DisplayName(top)
-	watched, service := watchedPlugin(samples, top)
-	w.watched, w.fixEligible = watched, true
 	fields["process"] = w.name
 	if watched {
 		fields["name"] = service.Name

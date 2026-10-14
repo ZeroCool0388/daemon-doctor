@@ -34,3 +34,19 @@ func (e *Engine) FixEligible(a Alert) bool {
 	}
 	return a.Kind != KindMemoryHog || e.mac.mem.fixEligible
 }
+
+// ResumeMemoryAlert restores a verified saved incident in a fresh engine only
+// when its latest reading is above the configured level with the same top
+// process and watched-service attribution. It does not create another alert.
+func (e *Engine) ResumeMemoryAlert(a Alert) bool {
+	if a.Kind != KindMemoryHog || e.mac == nil {
+		return false
+	}
+	w := &e.mac.mem
+	if w.active || !w.started || !w.fixEligible || w.name != a.Process || w.serviceID != a.ServiceID {
+		return false
+	}
+	w.active = true
+	e.mac.syncStop()
+	return true
+}

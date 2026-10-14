@@ -382,14 +382,20 @@ func (s *Store) Consume(now time.Time, approval Approval) (Raised, error) {
 // its nonce. A validation error leaves the approval available for retry.
 // validate runs under the store lock and must not call back into this store.
 func (s *Store) ConsumeIf(now time.Time, approval Approval, validate func(Raised) error) (Raised, error) {
-	raised, err := s.check(now, approval, validate)
+	raised, err := s.check(now, approval, validate, true)
 	if err != nil {
 		return Raised{}, err
 	}
 	return raised, nil
 }
 
-func (s *Store) check(now time.Time, approval Approval, validate func(Raised) error) (Raised, error) {
+// Verify checks an approval without consuming its nonce or holding the store
+// lock afterward, so callers can refresh observations before ConsumeIf.
+func (s *Store) Verify(now time.Time, approval Approval) (Raised, error) {
+	return s.check(now, approval, nil, false)
+}
+
+func (s *Store) check(now time.Time, approval Approval, validate func(Raised) error, consume bool) (Raised, error) {
 	if err := canonicalOK(approval); err != nil {
 		return Raised{}, err
 	}
@@ -430,6 +436,9 @@ func (s *Store) check(now time.Time, approval Approval, validate func(Raised) er
 		if err := validate(raised); err != nil {
 			return Raised{}, err
 		}
+	}
+	if !consume {
+		return raised, nil
 	}
 	if err := appendLine(filepath.Join(s.dir, "nonces.jsonl"), []byte(approval.Nonce)); err != nil {
 		return Raised{}, err
