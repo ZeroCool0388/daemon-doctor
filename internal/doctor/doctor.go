@@ -128,6 +128,10 @@ func (d *Doctor) Cycle(ctx context.Context) ([]ServiceStatus, error) {
 }
 
 func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
+	return d.cycleWithIntake(ctx, true)
+}
+
+func (d *Doctor) cycleWithIntake(ctx context.Context, intake bool) ([]ServiceStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -222,7 +226,9 @@ func (d *Doctor) cycle(ctx context.Context) ([]ServiceStatus, error) {
 	d.latest = out
 	d.sampledAt = d.now()
 	d.pruneAlerts()
-	d.intake(ctx)
+	if intake {
+		d.intake(ctx)
+	}
 	return out, nil
 }
 
@@ -574,7 +580,38 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 		_ = d.logRefusal(approval.AlertID, err)
 		return fixes.Result{}, err
 	}
-	raised, err := d.sec.Consume(d.now(), approval)
+	verified, err := d.sec.Verify(d.now(), approval)
+	if err != nil {
+		_ = d.logRefusal(approval.AlertID, err)
+		return fixes.Result{}, err
+	}
+	if verified.Kind == rules.KindMemoryHog {
+		fresh := d.sampledAt.IsZero()
+		// Refresh outside the security lock, without recursively polling
+		// approvals. The final ConsumeIf verifies again before using the nonce.
+		if _, err := d.cycleWithIntake(ctx, false); err != nil {
+			_ = d.logRefusal(approval.AlertID, err)
+			return fixes.Result{}, err
+		}
+		if fresh && !d.held {
+			alert := rules.Alert{
+				ID: verified.ID, ServiceID: verified.ServiceID, ServiceName: verified.ServiceName,
+				Kind: verified.Kind, Process: verified.Process, At: verified.At,
+				OfferFix: true, Actions: verified.Actions, Action: approval.FixID,
+			}
+			if d.Rules.ResumeMemoryAlert(alert) {
+				d.active[alert.ID] = alert
+			}
+		}
+	}
+	raised, err := d.sec.ConsumeIf(d.now(), approval, func(raised security.Raised) error {
+		if raised.Kind != rules.KindMemoryHog {
+			return nil
+		}
+		// Validate the same live memory eligibility as local offers before
+		// consuming the nonce, including the preapproved unwatched stop path.
+		return d.offerValid(offers.Offer{AlertID: raised.ID, ServiceID: raised.ServiceID, FixID: approval.FixID})
+	})
 	if err != nil {
 		_ = d.logRefusal(approval.AlertID, err)
 		return fixes.Result{}, err

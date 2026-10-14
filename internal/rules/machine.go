@@ -11,6 +11,8 @@ import (
 	"github.com/ZeroCool0388/daemon-doctor/internal/sysprobe"
 )
 
+const memoryRecoveryGrace = 3 * time.Minute
+
 // Sample is one plug-in's checks for the current snapshot.
 type Sample struct {
 	Plugin   plugins.Plugin
@@ -63,6 +65,8 @@ func (e *Engine) DecideMachine(now time.Time, snap sysprobe.Snapshot, samples []
 		alerts = append(alerts, networkBackAlert(host, samples, now))
 	}
 	if hold {
+		// Paused checks cannot confirm continuously low memory pressure.
+		st.mem.recovering = false
 		return MachineVerdict{Hold: true, Alerts: alerts}
 	}
 
@@ -105,7 +109,7 @@ type machineState struct {
 	networkBackPending bool
 	diskActive         bool
 	cpu                hogWatch
-	mem                hogWatch
+	mem                memoryWatch
 	stopAllowed        map[string]struct{}
 }
 
@@ -116,6 +120,16 @@ type hogWatch struct {
 	since   time.Time
 	pid     int
 	name    string
+}
+
+// Memory pressure belongs to the machine. Process attribution is captured only
+// when the alert fires, and only that current process remains eligible for fixes.
+type memoryWatch struct {
+	hogWatch
+	recovering  bool
+	belowSince  time.Time
+	fixEligible bool
+	serviceID   string
 }
 
 func (e *Engine) machine() *machineState {
@@ -236,32 +250,86 @@ func (st *machineState) observeCPU(host plugins.Plugin, snap sysprobe.Snapshot, 
 
 func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapshot, samples []Sample, now time.Time) ([]Alert, bool) {
 	spec, ok := checkByType(host, plugins.CheckMemory)
-	if !ok || !snap.Host.MemoryPressureKnown {
-		if ok && !snap.Host.MemoryPressureKnown {
-			st.mem = hogWatch{}
-		}
+	if !ok {
+		return nil, false
+	}
+	w := &st.mem
+	level := pressureRank(snap.Host.MemoryPressure)
+	if !snap.Host.MemoryPressureKnown || level < 0 {
+		w.recovering = false
+		w.fixEligible = false
 		return nil, false
 	}
 	want := spec.Level
 	if want == "" {
 		want = plugins.DefaultMemoryLevel
 	}
-	if pressureRank(snap.Host.MemoryPressure) < pressureRank(want) || pressureRank(want) < 1 {
-		st.mem = hogWatch{}
-		return nil, pressureRank(snap.Host.MemoryPressure) >= 0 && pressureRank(want) >= 1
+	if pressureRank(want) < 1 {
+		return nil, false
 	}
+	if level < pressureRank(want) {
+		w.fixEligible = false
+		if !w.started {
+			return nil, false
+		}
+		if !w.recovering {
+			w.recovering = true
+			w.belowSince = now
+		}
+		if now.Sub(w.belowSince) < memoryRecoveryGrace {
+			return nil, false
+		}
+		wasActive := w.active
+		*w = memoryWatch{}
+		return nil, wasActive
+	}
+	w.recovering = false
 	dur, ok := positiveDuration(spec.Duration)
 	if !ok {
 		return nil, false
 	}
+	if !w.started {
+		w.started = true
+		w.since = now
+	}
 	top, found := sysprobe.TopMemory(snap)
-	if !found {
-		st.mem = hogWatch{}
+	watched, service := watchedPlugin(samples, top)
+	serviceID := UnwatchedID
+	if watched {
+		serviceID = service.ID
+	}
+	if w.active {
+		w.fixEligible = found && w.pid == top.PID && w.name == sysprobe.DisplayName(top) && w.serviceID == serviceID
 		return nil, false
 	}
-	return st.sustain(&st.mem, top, samples, host, now, dur, KindMemoryHog, map[string]string{
-		"level": pressureWord(snap.Host.MemoryPressure),
-	}), false
+	// Keep the current above-threshold attribution even before the duration
+	// elapses, for validating a saved incident in a standalone approval command.
+	w.fixEligible = found
+	w.pid, w.name, w.watched, w.serviceID = 0, "", false, ""
+	if found {
+		w.pid, w.name, w.watched, w.serviceID = top.PID, sysprobe.DisplayName(top), watched, serviceID
+	}
+	if now.Sub(w.since) < dur {
+		return nil, false
+	}
+	w.active = true
+	fields := map[string]string{
+		"duration": formatDuration(now.Sub(w.since)),
+		"level":    pressureWord(snap.Host.MemoryPressure),
+	}
+	if !found {
+		return []Alert{{
+			ServiceID: host.ID, ServiceName: host.Name, Kind: KindMemoryHog, At: now,
+			Message: fill("Memory pressure has stayed at {level} for {duration}.", fields),
+		}}, false
+	}
+	fields["process"] = w.name
+	if watched {
+		fields["name"] = service.Name
+		return []Alert{serviceHogAlert(service, host, KindMemoryHog, fields, now)}, false
+	}
+	fields["name"] = w.name
+	return []Alert{unwatchedHogAlert(host, KindMemoryHog, w.name, fields, now)}, false
 }
 
 func (st *machineState) sustain(w *hogWatch, top sysprobe.Process, samples []Sample, host plugins.Plugin, now time.Time, dur time.Duration, kind string, extra map[string]string) []Alert {
@@ -296,7 +364,7 @@ func (st *machineState) syncStop() {
 	if st.cpu.active && !st.cpu.watched && st.cpu.name != "" {
 		next[st.cpu.name] = struct{}{}
 	}
-	if st.mem.active && !st.mem.watched && st.mem.name != "" {
+	if st.mem.active && st.mem.fixEligible && !st.mem.watched && st.mem.name != "" {
 		next[st.mem.name] = struct{}{}
 	}
 	st.stopAllowed = next

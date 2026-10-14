@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -346,11 +347,12 @@ func TestMemoryHogDurationAndLevel(t *testing.T) {
 	}
 	normal := hostSnap(false, true, 40, "normal", procs...)
 	eng.DecideMachine(start.Add(5*time.Minute), normal, samples(host))
-	eng.DecideMachine(start.Add(6*time.Minute), warn, samples(host))
-	if got := eng.DecideMachine(start.Add(10*time.Minute), warn, samples(host)); len(got.Alerts) != 0 {
+	eng.DecideMachine(start.Add(8*time.Minute), normal, samples(host))
+	eng.DecideMachine(start.Add(9*time.Minute), warn, samples(host))
+	if got := eng.DecideMachine(start.Add(13*time.Minute), warn, samples(host)); len(got.Alerts) != 0 {
 		t.Fatalf("window restarted: %+v", got)
 	}
-	got := eng.DecideMachine(start.Add(11*time.Minute), hostSnap(false, true, 40, "critical", procs...), samples(host))
+	got := eng.DecideMachine(start.Add(14*time.Minute), hostSnap(false, true, 40, "critical", procs...), samples(host))
 	if len(got.Alerts) != 1 || got.Alerts[0].Kind != KindMemoryHog || got.Alerts[0].Process != "ExampleTool" {
 		t.Fatalf("%+v", got)
 	}
@@ -364,6 +366,222 @@ func TestMemoryHogDurationAndLevel(t *testing.T) {
 	eng.DecideMachine(start, warn, samples(criticalOnly))
 	if got := eng.DecideMachine(start.Add(5*time.Minute), warn, samples(criticalOnly)); len(got.Alerts) != 0 {
 		t.Fatalf("warn is below critical: %+v", got)
+	}
+}
+
+func TestMemoryPressureTimerIgnoresTopPIDChanges(t *testing.T) {
+	for _, watchedAtAlert := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unwatched", true: "watched"}[watchedAtAlert], func(t *testing.T) {
+			start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+			eng := NewEngine(nil)
+			host := macPlugin()
+			list := samples(host, Sample{Plugin: codexPlugin(), Outcomes: healthyOutcomes()})
+			var alerts []Alert
+			for minute := 0; minute <= 6; minute++ {
+				codexTop := minute%2 == 0
+				if watchedAtAlert {
+					codexTop = !codexTop
+				}
+				codexBytes, toolBytes := int64(80), int64(90)
+				if codexTop {
+					codexBytes, toolBytes = toolBytes, codexBytes
+				}
+				snap := hostSnap(false, true, 40, "warn",
+					sysprobe.Process{PID: 4, Name: "codex", MemoryKnown: true, MemoryBytes: codexBytes},
+					sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: toolBytes})
+				got := eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), snap, list)
+				if minute < 5 && len(got.Alerts) != 0 {
+					t.Fatalf("early alert at minute %d: %+v", minute, got)
+				}
+				alerts = append(alerts, got.Alerts...)
+			}
+			if len(alerts) != 1 || alerts[0].Kind != KindMemoryHog || !alerts[0].At.Equal(start.Add(5*time.Minute)) {
+				t.Fatalf("expected one alert at five minutes despite alternating PIDs: %+v", alerts)
+			}
+			wantName, wantID, wantActions := "ExampleTool", UnwatchedID, "stop"
+			if watchedAtAlert {
+				wantName, wantID, wantActions = "codex", "codex", "stop,restart"
+			}
+			if alerts[0].Process != wantName || alerts[0].ServiceID != wantID || strings.Join(alerts[0].Actions, ",") != wantActions {
+				t.Fatalf("alert did not name the current top process with its approved fixes: %+v", alerts[0])
+			}
+		})
+	}
+}
+
+func TestMemoryPressureTimerSurvivesBriefNormalDips(t *testing.T) {
+	start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+	eng := NewEngine(nil)
+	host := macPlugin()
+	proc := sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: 80}
+	var alerts []Alert
+	for minute, pressure := range []string{"warn", "warn", "normal", "warn", "normal", "warn", "warn"} {
+		got := eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), hostSnap(false, true, 40, pressure, proc), samples(host))
+		if slices.Contains(got.Normal, KindMemoryHog) {
+			t.Fatalf("brief normal dip cleared the pressure incident at minute %d", minute)
+		}
+		alerts = append(alerts, got.Alerts...)
+	}
+	if len(alerts) != 1 || alerts[0].Kind != KindMemoryHog || !alerts[0].At.Equal(start.Add(5*time.Minute)) {
+		t.Fatalf("expected one memory alert despite one-minute normal dips: %+v", alerts)
+	}
+}
+
+func TestMemoryPressureRecoveryGraceResetsOnce(t *testing.T) {
+	start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+	eng := NewEngine(nil)
+	host := macPlugin()
+	proc := sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: 80}
+	observe := func(minute int, pressure string) MachineVerdict {
+		return eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), hostSnap(false, true, 40, pressure, proc), samples(host))
+	}
+	observe(0, "warn")
+	if got := observe(5, "warn"); len(got.Alerts) != 1 {
+		t.Fatalf("expected initial memory alert: %+v", got)
+	}
+	for _, minute := range []int{6, 7, 8} {
+		if got := observe(minute, "normal"); slices.Contains(got.Normal, KindMemoryHog) || len(got.Alerts) != 0 {
+			t.Fatalf("recovery before three continuous minutes below the level: %+v", got)
+		}
+	}
+	if got := observe(9, "normal"); !slices.Contains(got.Normal, KindMemoryHog) {
+		t.Fatalf("missing recovery after three minutes: %+v", got)
+	}
+	if got := observe(10, "normal"); slices.Contains(got.Normal, KindMemoryHog) {
+		t.Fatalf("memory recovery repeated: %+v", got)
+	}
+	for _, minute := range []int{11, 15} {
+		if got := observe(minute, "warn"); len(got.Alerts) != 0 {
+			t.Fatalf("memory timer did not reset after recovery: %+v", got)
+		}
+	}
+	if got := observe(16, "warn"); len(got.Alerts) != 1 || got.Alerts[0].Kind != KindMemoryHog {
+		t.Fatalf("new pressure incident did not alert: %+v", got)
+	}
+}
+
+func TestMemoryPressureAlertsWithoutProcess(t *testing.T) {
+	start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+	eng := NewEngine(nil)
+	host := macPlugin()
+	for minute := 0; minute <= 6; minute++ {
+		got := eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), hostSnap(false, true, 40, "warn"), samples(host))
+		if minute != 5 {
+			if len(got.Alerts) != 0 {
+				t.Fatalf("unexpected alert at minute %d: %+v", minute, got)
+			}
+			continue
+		}
+		if len(got.Alerts) != 1 {
+			t.Fatalf("pressure without a top process never alerted: %+v", got)
+		}
+		alert := got.Alerts[0]
+		if alert.Kind != KindMemoryHog || alert.ServiceID != host.ID || alert.ServiceName != host.Name || alert.Process != "" || alert.OfferFix || len(alert.Actions) != 0 || alert.Action != "" {
+			t.Fatalf("machine pressure alert must not offer a process fix: %+v", alert)
+		}
+		if alert.Message != "Memory pressure has stayed at warning for 5 minutes." {
+			t.Fatalf("expected a plain machine pressure message: %q", alert.Message)
+		}
+	}
+	proc := sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: 80}
+	if got := eng.DecideMachine(start.Add(7*time.Minute), hostSnap(false, true, 40, "warn", proc), samples(host)); len(got.Alerts) != 0 || eng.StopAllowed(proc.Name) {
+		t.Fatalf("later process attribution repeated the machine alert or granted an unoffered stop: %+v", got)
+	}
+}
+
+func TestMemoryPressureFixesStayWithTheAlertedProcess(t *testing.T) {
+	for _, watched := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unwatched", true: "watched"}[watched], func(t *testing.T) {
+			start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+			eng := NewEngine(nil)
+			host := macPlugin()
+			list := samples(host, Sample{Plugin: codexPlugin(), Outcomes: healthyOutcomes()})
+			proc := sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: 80}
+			if watched {
+				proc.Name = "codex"
+			}
+			observe := func(minute int, pressure string, procs ...sysprobe.Process) MachineVerdict {
+				return eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), hostSnap(false, true, 40, pressure, procs...), list)
+			}
+			observe(0, "warn", proc)
+			got := observe(5, "warn", proc)
+			if len(got.Alerts) != 1 {
+				t.Fatalf("expected a memory alert: %+v", got)
+			}
+			alert := got.Alerts[0]
+			if !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
+				t.Fatal("named process did not receive the expected fix permissions")
+			}
+			// A brief dip keeps the incident, but a process fix is no longer needed.
+			got = observe(6, "normal", proc)
+			if slices.Contains(got.Normal, KindMemoryHog) || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
+				t.Fatalf("brief dip cleared the incident or retained a stale fix: %+v", got)
+			}
+			got = observe(7, "warn", proc)
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || !eng.FixEligible(alert) {
+				t.Fatalf("returning pressure repeated the alert or lost its current target: %+v", got)
+			}
+			other := sysprobe.Process{PID: 10, Name: "OtherTool", MemoryKnown: true, MemoryBytes: 90}
+			got = observe(8, "warn", proc, other)
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) || eng.StopAllowed(other.Name) {
+				t.Fatalf("changing the top process repeated the alert or granted a stale/unoffered fix: %+v", got)
+			}
+			got = observe(9, "warn")
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
+				t.Fatalf("missing process retained a process permission: %+v", got)
+			}
+			proc.PID++ // A replacement with the same name is not the alerted process.
+			got = observe(10, "warn", proc)
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
+				t.Fatalf("replacement process inherited the previous alert's permission: %+v", got)
+			}
+			proc.PID--
+			got = observe(11, "warn", proc)
+			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
+				t.Fatalf("original process did not regain its offer without repeating the alert: %+v", got)
+			}
+			observe(12, "normal", proc)
+			observe(15, "normal", proc)
+			if eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
+				t.Fatal("memory recovery retained the incident or its fix permissions")
+			}
+		})
+	}
+}
+
+func TestMemoryPressureRecoveryNeedsContinuousKnownReadings(t *testing.T) {
+	for _, interruption := range []string{"unknown", "invalid level", "held"} {
+		t.Run(interruption, func(t *testing.T) {
+			start := time.Date(2026, 1, 2, 21, 0, 0, 0, time.UTC)
+			eng := NewEngine(nil)
+			host := macPlugin()
+			proc := sysprobe.Process{PID: 9, Name: "ExampleTool", MemoryKnown: true, MemoryBytes: 80}
+			snap := hostSnap(false, true, 40, "warn", proc)
+			eng.DecideMachine(start, snap, samples(host))
+			eng.DecideMachine(start.Add(5*time.Minute), snap, samples(host))
+			snap.Host.MemoryPressure = "normal"
+			eng.DecideMachine(start.Add(6*time.Minute), snap, samples(host))
+			paused := snap
+			switch interruption {
+			case "unknown":
+				paused.Host.MemoryPressureKnown = false
+			case "invalid level":
+				paused.Host.MemoryPressure = "unknown"
+			case "held":
+				paused.Host.NetworkUp = false
+			}
+			if got := eng.DecideMachine(start.Add(8*time.Minute), paused, samples(host)); slices.Contains(got.Normal, KindMemoryHog) {
+				t.Fatalf("interrupted recovery sent a premature all-clear: %+v", got)
+			}
+			for _, minute := range []int{9, 11} {
+				if got := eng.DecideMachine(start.Add(time.Duration(minute)*time.Minute), snap, samples(host)); slices.Contains(got.Normal, KindMemoryHog) {
+					t.Fatalf("interruption counted toward three continuous minutes: %+v", got)
+				}
+			}
+			if got := eng.DecideMachine(start.Add(12*time.Minute), snap, samples(host)); !slices.Contains(got.Normal, KindMemoryHog) {
+				t.Fatalf("missing all-clear after confirmed recovery: %+v", got)
+			}
+		})
 	}
 }
 
