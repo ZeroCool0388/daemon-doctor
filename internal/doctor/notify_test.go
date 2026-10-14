@@ -129,6 +129,11 @@ func TestNtfyMemoryHogAlertsOnceAndRecovers(t *testing.T) {
 	snap.Host.MemoryPressure = "normal"
 	src.Set(snap)
 	cycle()
+	if events := sent(); len(events) != 0 {
+		t.Fatalf("memory all-clear sent before the recovery grace: %+v", events)
+	}
+	now = now.Add(3 * time.Minute)
+	cycle()
 	if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != "Memory pressure is back below the alert level." {
 		t.Fatalf("expected one memory all-clear, got %+v", events)
 	}
@@ -298,6 +303,13 @@ func TestNtfyMachineConditionsHaveIndependentLifecycles(t *testing.T) {
 				snap.Host.DiskFreePercent = 40
 				snap.Host.NetworkUp = true
 				cycle()
+				if tc.kind == rules.KindMemoryHog {
+					if events := sent(); len(events) != 0 {
+						t.Fatalf("memory all-clear sent before the recovery grace: %+v", events)
+					}
+					now = now.Add(3 * time.Minute)
+					cycle()
+				}
 				if events := sent(); len(events) != 1 || events[0].State != rules.StatusOK || events[0].Message != tc.want {
 					t.Fatalf("expected one machine all-clear, got %+v", events)
 				}

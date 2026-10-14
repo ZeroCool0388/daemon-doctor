@@ -15,7 +15,10 @@ func (e *Engine) AlertActive(a Alert) bool {
 		}
 		w := e.mac.cpu
 		if a.Kind == KindMemoryHog {
-			w = e.mac.mem
+			if !e.mac.mem.fixEligible {
+				return false
+			}
+			w = e.mac.mem.hogWatch
 		}
 		return w.active && w.name == a.Process && w.watched == (a.ServiceID != UnwatchedID)
 	default:
