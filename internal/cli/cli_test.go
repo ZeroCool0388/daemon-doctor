@@ -45,7 +45,7 @@ func TestDemoPrintsScriptedAlerts(t *testing.T) {
 	if !strings.Contains(stdout.String(), "No Mac, no relay, and no phone.") {
 		t.Fatalf("stdout: %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Needs a look: Example Mail.") {
+	if !strings.Contains(stdout.String(), "Network back at 12:07 UTC. 4 of 5 services healthy.\nOffline:\n• Example Mail\nOnline:\n• Example Bridge\n• Example Desktop App\n• Example Sync\n• This Mac") {
 		t.Fatalf("stdout: %s", stdout.String())
 	}
 	code = Run([]string{"daemon-doctor", "demo", "--config", "config.yaml"}, strings.NewReader(""), &stdout, &stderr)

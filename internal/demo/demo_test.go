@@ -24,7 +24,7 @@ func TestReplay(t *testing.T) {
 	want := []string{
 		"Example Desktop App is open but has no established outbound connection on port 443, so it looks stuck.",
 		"The Mac lost its network connection at 12:05 UTC. Other alerts are paused until it is back.",
-		"The network is back at 12:07 UTC. 4 of 5 services look healthy. Needs a look: Example Mail.",
+		"Network back at 12:07 UTC. 4 of 5 services healthy.",
 		"Example Mail has stopped. It is not running.",
 		"A process that is not on the watched list (ExampleTool) has used 90% of the CPU for 5 minutes.",
 		"Example Bridge has stopped. It is not running.",
@@ -34,14 +34,9 @@ func TestReplay(t *testing.T) {
 	if strings.Join(alerts, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("alerts:\n%s\n\nfull:\n%s", strings.Join(alerts, "\n"), text)
 	}
-	back := ""
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "The network is back") {
-			back = line
-		}
-	}
-	if strings.Contains(back, "Example Sync") || strings.Contains(back, "Example Desktop App") || strings.Contains(back, "Example Bridge") {
-		t.Fatalf("recovery line names a service that came back: %s", back)
+	back := "Network back at 12:07 UTC. 4 of 5 services healthy.\nOffline:\n• Example Mail\nOnline:\n• Example Bridge\n• Example Desktop App\n• Example Sync\n• This Mac"
+	if !strings.Contains(text, "12:07 UTC  alert: "+back+"\n12:07 UTC  fix offered: none") {
+		t.Fatalf("missing recovery service lists:\n%s", text)
 	}
 	if !strings.Contains(text, "outcome: Fixed. Example Desktop App looks healthy on recheck.") {
 		t.Fatal("stuck app was not reported fixed")

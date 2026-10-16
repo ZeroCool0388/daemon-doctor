@@ -421,16 +421,19 @@ func hostAlert(host plugins.Plugin, kind string, fields map[string]string, now t
 }
 
 func networkBackAlert(host plugins.Plugin, samples []Sample, now time.Time) Alert {
-	ok, total, needs := summarizeSamples(samples)
+	online, offline := summarizeSamples(samples)
 	fields := map[string]string{
 		"name":  host.Name,
 		"time":  formatClock(now),
-		"ok":    strconv.Itoa(ok),
-		"total": strconv.Itoa(total),
+		"ok":    strconv.Itoa(len(online)),
+		"total": strconv.Itoa(len(online) + len(offline)),
 	}
 	msg := fill(templateFor(host.Messages, KindNetworkBack), fields)
-	if ok != total && len(needs) > 0 {
-		msg += " Needs a look: " + strings.Join(needs, ", ") + "."
+	if len(offline) > 0 {
+		msg += "\nOffline:\n• " + strings.Join(offline, "\n• ")
+	}
+	if len(online) > 0 {
+		msg += "\nOnline:\n• " + strings.Join(online, "\n• ")
 	}
 	return Alert{
 		ServiceID:   host.ID,
@@ -490,15 +493,15 @@ func hogActions(p plugins.Plugin) []string {
 	return actions
 }
 
-func summarizeSamples(samples []Sample) (ok, total int, needs []string) {
+func summarizeSamples(samples []Sample) (online, offline []string) {
 	for _, sample := range samples {
-		total++
 		if checks.AllHealthy(sample.Outcomes) {
-			ok++
-			continue
+			online = append(online, sample.Plugin.Name)
+		} else {
+			offline = append(offline, sample.Plugin.Name)
 		}
-		needs = append(needs, sample.Plugin.Name)
 	}
-	sort.Strings(needs)
-	return ok, total, needs
+	sort.Strings(online)
+	sort.Strings(offline)
+	return online, offline
 }
