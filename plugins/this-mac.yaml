@@ -17,7 +17,7 @@ messages:
   sleep: "The Mac went to sleep."
   wake: "The Mac woke up."
   network_down: "The Mac lost its network connection at {time}. Other alerts are paused until it is back."
-  network_back: "The network is back at {time}. {ok} of {total} services look healthy."
+  network_back: "Network back at {time}. {ok} of {total} services healthy."
   disk_low: "Free disk space is low: {free}% is left."
   cpu_hog: "{name} has used {percent}% of the CPU for {duration}."
   memory_hog: "{name} is the largest memory user, and memory pressure has stayed at {level} for {duration}."

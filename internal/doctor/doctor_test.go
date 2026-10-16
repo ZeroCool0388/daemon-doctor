@@ -301,7 +301,7 @@ func TestNetworkDownPausesServiceChecks(t *testing.T) {
 			summary = alert.Message
 		}
 	}
-	if summary == "" || !bytes.Contains([]byte(summary), []byte("services look healthy")) {
+	if summary == "" || !bytes.Contains([]byte(summary), []byte("services healthy")) {
 		t.Fatalf("summary: %q alerts %+v", summary, rows[0].Alerts)
 	}
 	rows, err = d.Cycle(context.Background())

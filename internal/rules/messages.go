@@ -86,7 +86,7 @@ func defaultTemplate(kind string) string {
 	case KindNetworkDown:
 		return "The Mac lost its network connection at {time}. Other alerts are paused until it is back."
 	case KindNetworkBack:
-		return "The network is back at {time}. {ok} of {total} services look healthy."
+		return "Network back at {time}. {ok} of {total} services healthy."
 	case KindDiskLow:
 		return "Free disk space is low: {free}% is left."
 	case KindCPUHog:

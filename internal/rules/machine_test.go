@@ -150,8 +150,53 @@ func TestSleepAndNetworkHold(t *testing.T) {
 	if back.Hold || len(back.Alerts) != 1 || back.Alerts[0].Kind != KindNetworkBack {
 		t.Fatalf("network back: %+v", back)
 	}
-	if back.Alerts[0].Message != "The network is back at 21:07 UTC. 2 of 3 services look healthy. Needs a look: Syncthing." {
+	if back.Alerts[0].Message != "Network back at 21:07 UTC. 2 of 3 services healthy.\nOffline:\n• Syncthing\nOnline:\n• Codex\n• This Mac" {
 		t.Fatal(back.Alerts[0].Message)
+	}
+}
+
+func TestNetworkBackServiceLists(t *testing.T) {
+	healthy := func(name string) Sample {
+		return Sample{Plugin: plugins.Plugin{Name: name}, Outcomes: healthyOutcomes()}
+	}
+	offline := func(name string) Sample {
+		return Sample{Plugin: plugins.Plugin{Name: name}, Outcomes: []checks.Outcome{{Healthy: false}}}
+	}
+	for _, tt := range []struct {
+		name    string
+		samples []Sample
+		want    string
+	}{
+		{
+			name:    "mixed",
+			samples: []Sample{offline("Zulu Service"), healthy("Codex"), offline("Grok Bot"), healthy("ChatGPT")},
+			want:    "Network back at 21:07 UTC. 2 of 4 services healthy.\nOffline:\n• Grok Bot\n• Zulu Service\nOnline:\n• ChatGPT\n• Codex",
+		},
+		{
+			name:    "all healthy",
+			samples: []Sample{healthy("Codex"), healthy("ChatGPT")},
+			want:    "Network back at 21:07 UTC. 2 of 2 services healthy.\nOnline:\n• ChatGPT\n• Codex",
+		},
+		{
+			name:    "all offline",
+			samples: []Sample{offline("Zulu Service"), offline("Grok Bot")},
+			want:    "Network back at 21:07 UTC. 0 of 2 services healthy.\nOffline:\n• Grok Bot\n• Zulu Service",
+		},
+		{
+			name: "no services",
+			want: "Network back at 21:07 UTC. 0 of 0 services healthy.",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reversed := slices.Clone(tt.samples)
+			slices.Reverse(reversed)
+			for _, samples := range [][]Sample{tt.samples, reversed} {
+				got := networkBackAlert(macPlugin(), samples, time.Date(2026, 1, 2, 21, 7, 0, 0, time.UTC))
+				if got.Message != tt.want {
+					t.Fatalf("message:\n%s\nwant:\n%s", got.Message, tt.want)
+				}
+			}
+		})
 	}
 }
 
@@ -174,7 +219,7 @@ func TestNetworkSummaryWaitsUntilAwake(t *testing.T) {
 	if awake.Alerts[0].Kind != KindWake || awake.Alerts[1].Kind != KindNetworkBack {
 		t.Fatalf("order: %+v", awake.Alerts)
 	}
-	if strings.Contains(awake.Alerts[1].Message, "Needs a look") {
+	if strings.Contains(awake.Alerts[1].Message, "Offline:") {
 		t.Fatal(awake.Alerts[1].Message)
 	}
 }
