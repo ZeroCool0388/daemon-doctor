@@ -71,6 +71,46 @@ func relaunchRunner(src sysprobe.Source, ctrl Controller) *Runner {
 	return &Runner{Source: src, Control: ctrl, Checks: checks.NewRunner(checks.NewRegistry())}
 }
 
+type lifetimeCall struct {
+	pid       int
+	startTime uint64
+	sig       syscall.Signal
+}
+
+// lifetimeCtrl is a controller that checks PID plus start time and signals
+// as one step. It reads src at signal time, so a reused PID is refused.
+type lifetimeCtrl struct {
+	*relaunchCtrl
+	src   sysprobe.Source
+	calls []lifetimeCall
+}
+
+func (c *lifetimeCtrl) SignalLifetime(ctx context.Context, pid int, startTime uint64, sig syscall.Signal) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.calls = append(c.calls, lifetimeCall{pid: pid, startTime: startTime, sig: sig})
+	if c.src == nil || startTime == 0 {
+		return ErrLifetimeMismatch
+	}
+	snap, err := c.src.Take(ctx)
+	if err != nil {
+		return err
+	}
+	current, exists := processIdentities(snap, []int{pid})[pid]
+	if !exists {
+		return ErrLifetimeExited
+	}
+	if !sameProcess(sysprobe.Process{PID: pid, StartTime: startTime}, current) {
+		return ErrLifetimeMismatch
+	}
+	return c.Signal(pid, sig)
+}
+
+func lifetimeRunner(src sysprobe.Source, ctrl *relaunchCtrl) *Runner {
+	return relaunchRunner(src, &lifetimeCtrl{relaunchCtrl: ctrl, src: src})
+}
+
 func TestRelaunchGracefulQuitLaunchAndFullRecheck(t *testing.T) {
 	src := &sysprobe.MemSource{}
 	src.Set(flaggedTree(false))
@@ -146,12 +186,18 @@ func TestRelaunchKillFallbackUsesSelectorAndChildrenFirst(t *testing.T) {
 		src.Set(snap)
 		return nil
 	}
-	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), p, plugins.FixRelaunch, false)
+	life := &lifetimeCtrl{relaunchCtrl: ctrl, src: src}
+	res, err := relaunchRunner(src, life).Apply(context.Background(), p, plugins.FixRelaunch, false)
 	if err != nil || !res.Fixed || res.QuitError == "" || res.Signal != "KILL" {
 		t.Fatalf("fallback: %+v %v", res, err)
 	}
 	if !reflect.DeepEqual(ctrl.pids, []int{6, 4}) || !reflect.DeepEqual(ctrl.sigs, []syscall.Signal{syscall.SIGKILL, syscall.SIGKILL}) || len(ctrl.launches) != 1 {
 		t.Fatalf("unsafe fallback: %+v", ctrl)
+	}
+	// Children first, and each signal carries the original start time.
+	wantCalls := []lifetimeCall{{pid: 6, startTime: 1001, sig: syscall.SIGKILL}, {pid: 4, startTime: 1000, sig: syscall.SIGKILL}}
+	if !reflect.DeepEqual(life.calls, wantCalls) {
+		t.Fatalf("lifetime signals: %+v", life.calls)
 	}
 }
 
@@ -165,7 +211,7 @@ func TestRelaunchWaitsForOrphanedChildren(t *testing.T) {
 	}}
 	ctrl.signal = func(pid int) error { src.Set(sysprobe.Snapshot{}); return nil }
 	ctrl.launch = func() error { src.Set(flaggedTree(true)); return nil }
-	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	res, err := lifetimeRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err != nil || !res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{6}) {
 		t.Fatalf("orphaned helper: %+v %v %+v", res, err, ctrl)
 	}
@@ -180,7 +226,7 @@ func TestRelaunchTracksChildrenCreatedDuringQuit(t *testing.T) {
 	orphan := sysprobe.Snapshot{Processes: []sysprobe.Process{child}}
 	src := &sysprobe.ScriptSource{Snaps: []sysprobe.Snapshot{initial, withChild, orphan, orphan, {}, flaggedTree(true), flaggedTree(true)}}
 	ctrl := &relaunchCtrl{}
-	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	res, err := lifetimeRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err != nil || !res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{7}) {
 		t.Fatalf("new helper was missed: %+v %v %+v", res, err, ctrl)
 	}
@@ -276,9 +322,68 @@ func TestRelaunchChecksLifetimeAgainBeforeEachKill(t *testing.T) {
 		src.Set(replacement)
 		return nil
 	}}
-	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	res, err := lifetimeRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err == nil || res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{6}) || len(ctrl.launches) != 0 {
 		t.Fatalf("reused app PID killed: %+v %v %+v", res, err, ctrl)
+	}
+	if !strings.Contains(err.Error(), "KILL refused") {
+		t.Fatalf("lifetime mismatch was not refused: %v", err)
+	}
+}
+
+func TestRelaunchRefusesKillWithoutLifetimeSignaler(t *testing.T) {
+	src := &sysprobe.MemSource{}
+	src.Set(flaggedTree(false))
+	ctrl := &relaunchCtrl{}
+	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	if err == nil || res.Fixed || !strings.Contains(err.Error(), "KILL refused") {
+		t.Fatalf("numeric KILL was not refused: %+v %v", res, err)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.sigs) != 0 || len(ctrl.launches) != 0 {
+		t.Fatalf("refused KILL still signaled or launched: %+v", ctrl)
+	}
+	if _, ok := Controller(OSController{}).(LifetimeSignaler); ok {
+		t.Fatal("OSController implements lifetime signaling")
+	}
+}
+
+// flipSource returns the current snapshot, then switches to next once call
+// number at is reached. The switch is visible to that call.
+type flipSource struct {
+	*sysprobe.MemSource
+	at   int
+	next sysprobe.Snapshot
+}
+
+func (f *flipSource) Take(ctx context.Context) (sysprobe.Snapshot, error) {
+	if f.Takes+1 == f.at {
+		f.Set(f.next)
+	}
+	return f.MemSource.Take(ctx)
+}
+
+func TestRelaunchRefusesKillWhenIdentityFailsAtSignalTime(t *testing.T) {
+	base := &sysprobe.MemSource{}
+	base.Set(flaggedTree(false))
+	replacement := flaggedTree(false)
+	for i := range replacement.Processes {
+		replacement.Processes[i].StartTime++
+	}
+	// Takes 1–3 are the precondition, the quit wait, and the post-grace
+	// sample. Take 4 is the first lifetime check, and it must already see
+	// the reused PIDs.
+	src := &flipSource{MemSource: base, at: 4, next: replacement}
+	ctrl := &relaunchCtrl{}
+	life := &lifetimeCtrl{relaunchCtrl: ctrl, src: src}
+	res, err := relaunchRunner(src, life).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	if err == nil || res.Fixed || !strings.Contains(err.Error(), "KILL refused") || !strings.Contains(err.Error(), "pid 6") {
+		t.Fatalf("signal-time mismatch was not refused: %+v %v", res, err)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.launches) != 0 {
+		t.Fatalf("mismatched lifetime was signaled or launched: %+v", ctrl)
+	}
+	if len(life.calls) != 1 || life.calls[0].pid != 6 || life.calls[0].startTime != 1001 || life.calls[0].sig != syscall.SIGKILL {
+		t.Fatalf("lifetime check: %+v", life.calls)
 	}
 }
 
@@ -356,7 +461,7 @@ func TestRelaunchWaitsForTrackedLifetimeAfterExec(t *testing.T) {
 				src.Set(flaggedTree(true))
 				return nil
 			}
-			res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+			res, err := lifetimeRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 			if err != nil || !res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{pid}) || len(ctrl.launches) != 1 {
 				t.Fatalf("exec lifetime not stopped before launch: %+v %v %+v", res, err, ctrl)
 			}
@@ -479,7 +584,7 @@ func TestRelaunchCancellationStopsEveryPhase(t *testing.T) {
 				ctrl.launch = func() error { cancel(); return nil }
 			}
 			start := time.Now()
-			res, err := relaunchRunner(src, ctrl).Apply(ctx, relaunchPlugin(), plugins.FixRelaunch, false)
+			res, err := lifetimeRunner(src, ctrl).Apply(ctx, relaunchPlugin(), plugins.FixRelaunch, false)
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("cancellation: %+v %v", res, err)
 			}
@@ -519,7 +624,7 @@ func TestRelaunchKillAndLauncherFailuresDoNotReportFixed(t *testing.T) {
 					return nil
 				}
 			}
-			res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+			res, err := lifetimeRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 			if res.Fixed || !strings.HasPrefix(res.Message, "Didn't work.") || len(res.Outcomes) == 0 {
 				t.Fatalf("failed fix: %+v %v", res, err)
 			}

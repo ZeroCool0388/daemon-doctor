@@ -142,7 +142,8 @@ type Messages struct {
 // executed directly with no shell. Args are the fixed arguments from this
 // file. stop never launches a program. launchctl_kickstart takes a label
 // and does not take a launcher. relaunch requires App and Launcher; QuitTimeout
-// bounds the graceful quit before a KILL fallback.
+// bounds the graceful quit before a KILL fallback is considered. KILL is sent
+// only when the controller can match the process lifetime and signal in one step.
 type Fix struct {
 	Kind        string   `yaml:"kind" toml:"kind"`
 	Launcher    string   `yaml:"launcher" toml:"launcher"`

@@ -18,6 +18,24 @@ type AppQuitter interface {
 	Quit(ctx context.Context, app string) error
 }
 
+// LifetimeSignaler is optional. A controller implements it when it can confirm
+// that pid still belongs to the lifetime identified by startTime and send sig
+// as one step. The relaunch KILL fallback calls only this method. It never
+// falls back to Controller.Signal by numeric PID.
+//
+// Return ErrLifetimeExited when pid is no longer running.
+// Return ErrLifetimeMismatch when pid is a different lifetime, or when its
+// start time cannot be confirmed. Do not send a signal in either case.
+type LifetimeSignaler interface {
+	SignalLifetime(ctx context.Context, pid int, startTime uint64, sig syscall.Signal) error
+}
+
+// ErrLifetimeExited means the requested PID is not running, so no signal was sent.
+var ErrLifetimeExited = errors.New("process exited")
+
+// ErrLifetimeMismatch means the PID is not the requested lifetime, so no signal was sent.
+var ErrLifetimeMismatch = errors.New("process lifetime mismatch")
+
 const relaunchPoll = 100 * time.Millisecond
 const relaunchKillWait = 2 * time.Second
 const relaunchCheckWait = 5 * time.Second
@@ -251,27 +269,34 @@ func sameProcess(old, current sysprobe.Process) bool {
 	return old.PID == current.PID && old.StartTime != 0 && old.StartTime == current.StartTime
 }
 
-// Re-sample before each signal: the PID can be reused after the timeout sample
-// or while an earlier child in the kill order is being stopped.
+// killOriginal sends SIGKILL only through a LifetimeSignaler, which checks the
+// process lifetime and signals as one step. A controller that cannot do that
+// refuses the fallback. There is no kill by plain numeric PID.
 func (r *Runner) killOriginal(ctx context.Context, res *Result, pids []int, original map[int]sysprobe.Process) error {
+	signaler, ok := r.Control.(LifetimeSignaler)
+	if !ok {
+		return fmt.Errorf("KILL refused: controller cannot check process identity and signal in one step")
+	}
 	for _, pid := range pids {
-		snap, err := r.take(ctx)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		current, exists := processIdentities(snap, []int{pid})[pid]
-		if !exists {
-			continue // exited before its turn
+		proc := original[pid]
+		if proc.PID != pid || proc.StartTime == 0 {
+			return fmt.Errorf("cannot verify original lifetime of pid %d; KILL refused", pid)
 		}
-		if !sameProcess(original[pid], current) {
+		err := signaler.SignalLifetime(ctx, pid, proc.StartTime, syscall.SIGKILL)
+		if err == nil || errors.Is(err, ErrLifetimeExited) {
+			continue
+		}
+		if errors.Is(err, ErrLifetimeMismatch) {
 			return fmt.Errorf("process lifetime changed for pid %d; KILL refused", pid)
 		}
-		if err := r.signal(ctx, res, []int{pid}, syscall.SIGKILL, "", nil, false); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		if res.SignalError != "" {
-			return fmt.Errorf("kill failed: %s", res.SignalError)
-		}
+		res.SignalError = err.Error()
+		return fmt.Errorf("kill failed: %s", res.SignalError)
 	}
 	return nil
 }
