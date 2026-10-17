@@ -608,9 +608,10 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 		if raised.Kind != rules.KindMemoryHog {
 			return nil
 		}
-		// Validate the same live memory eligibility as local offers before
-		// consuming the nonce, including the preapproved unwatched stop path.
-		return d.offerValid(offers.Offer{AlertID: raised.ID, ServiceID: raised.ServiceID, FixID: approval.FixID})
+		// The sample above is the one that counts, including between cycles,
+		// after a restart, and for fix --approval. Refuse without consuming
+		// the nonce when that sample is no longer eligible.
+		return d.approveMemory(raised, approval.FixID)
 	})
 	if err != nil {
 		_ = d.logRefusal(approval.AlertID, err)
@@ -629,6 +630,35 @@ func (d *Doctor) applyApproval(ctx context.Context, raw []byte, dryRun bool) (fi
 	}
 	d.publishResult(ctx, raised.ID, fixID, res, err)
 	return res, err
+}
+
+func (d *Doctor) approveMemory(raised security.Raised, fixID string) error {
+	if d.held {
+		return fmt.Errorf("memory fix is paused while the Mac is asleep or the network is down")
+	}
+	alert := rules.Alert{
+		ID: raised.ID, ServiceID: raised.ServiceID, ServiceName: raised.ServiceName,
+		Kind: raised.Kind, Process: raised.Process, At: raised.At,
+		OfferFix: true, Actions: raised.Actions, Action: fixID,
+	}
+	if !d.Rules.FixEligible(alert) {
+		return memoryIneligible(d.Rules.MemoryEligibilityReason(alert))
+	}
+	if _, ok := d.active[alert.ID]; !ok {
+		reason := d.Rules.MemoryEligibilityReason(alert)
+		if reason == "" {
+			reason = "the memory fix offer is not active"
+		}
+		return memoryIneligible(reason)
+	}
+	return d.offerValid(offers.Offer{AlertID: raised.ID, ServiceID: raised.ServiceID, FixID: fixID})
+}
+
+func memoryIneligible(reason string) error {
+	if reason == "" {
+		reason = "the memory fix offer is not active"
+	}
+	return fmt.Errorf("memory fix is no longer eligible: %s", reason)
 }
 
 func (d *Doctor) noteAlert(ctx context.Context, a rules.Alert) error {

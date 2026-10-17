@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZeroCool0388/daemon-doctor/internal/rules"
 	"github.com/ZeroCool0388/daemon-doctor/internal/security"
 )
 
@@ -322,6 +323,80 @@ func TestFixApprovalFile(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("smuggled command created a file")
+	}
+}
+
+func TestFixApprovalRechecksMemorySample(t *testing.T) {
+	path := writeFixture(t)
+	body, err := os.ReadFile(filepath.Join("..", "..", "plugins", "this-mac.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "plugins", "this-mac.yaml"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"daemon-doctor", "pair", "--config", path}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatal(stderr.String())
+	}
+	payload := strings.TrimPrefix(strings.Split(stdout.String(), "\n")[0], "payload ")
+	_, pairingCode, _, _, err := security.ParsePayload(strings.TrimSpace(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phonePub, phonePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := security.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := sec.AcceptPairing(now, pairingFor(t, sec, pairingCode, phonePub)); err != nil {
+		t.Fatal(err)
+	}
+	alertID := security.NewID()
+	if err := sec.RecordAlert(security.Raised{
+		ID: alertID, ServiceID: rules.UnwatchedID, ServiceName: "This Mac",
+		Kind: rules.KindMemoryHog, Process: "ExampleTool", Actions: []string{"stop"}, At: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nonce := security.NewID()
+	signed, err := security.Sign(phonePriv, security.Approval{
+		MacID: sec.MacID(), AlertID: alertID, FixID: "stop", Nonce: nonce, Expires: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := security.MarshalApproval(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalPath := filepath.Join(filepath.Dir(path), "approval.json")
+	if err := os.WriteFile(approvalPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func() int {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		return Run([]string{"daemon-doctor", "fix", "--config", path, "--approval", approvalPath, "--dry-run"}, strings.NewReader(""), &stdout, &stderr)
+	}
+	if code := run(); code == 0 || !strings.Contains(stderr.String(), "memory fix") {
+		t.Fatalf("code %d stdout %s stderr %s", code, stdout.String(), stderr.String())
+	}
+	noncePath := filepath.Join(filepath.Dir(path), "nonces.jsonl")
+	data, err := os.ReadFile(noncePath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), nonce) {
+		t.Fatal("ineligible fix --approval consumed the nonce")
+	}
+	if code := run(); code == 0 || strings.Contains(stderr.String(), "already used") {
+		t.Fatalf("retry code %d stderr %s", code, stderr.String())
 	}
 }
 

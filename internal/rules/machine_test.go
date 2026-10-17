@@ -557,10 +557,10 @@ func TestMemoryPressureFixesStayWithTheAlertedProcess(t *testing.T) {
 			if !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
 				t.Fatal("named process did not receive the expected fix permissions")
 			}
-			// A brief dip keeps the incident, but a process fix is no longer needed.
+			// One sample below the level keeps the incident and its fix offer.
 			got = observe(6, "normal", proc)
-			if slices.Contains(got.Normal, KindMemoryHog) || !eng.AlertActive(alert) || eng.FixEligible(alert) || eng.StopAllowed(proc.Name) {
-				t.Fatalf("brief dip cleared the incident or retained a stale fix: %+v", got)
+			if slices.Contains(got.Normal, KindMemoryHog) || !eng.AlertActive(alert) || !eng.FixEligible(alert) || eng.StopAllowed(proc.Name) == watched {
+				t.Fatalf("one-sample dip dropped the memory fix offer: %+v", got)
 			}
 			got = observe(7, "warn", proc)
 			if len(got.Alerts) != 0 || !eng.AlertActive(alert) || !eng.FixEligible(alert) {

@@ -77,12 +77,24 @@ func TestMemoryOfferReturnsAfterTemporaryIneligibility(t *testing.T) {
 				if _, retained := d.active[alert.ID]; !retained || !d.Rules.AlertActive(alert) {
 					t.Fatal("temporary fix ineligibility removed the active memory incident")
 				}
-				if current, err := d.OfferedFixes(); err != nil || len(current) != 0 {
-					t.Fatalf("ineligible memory fixes remained available: %+v, %v", current, err)
-				}
-				for _, offer := range original {
-					if _, err := d.ApplyOffer(context.Background(), offer.ID, "", true); err == nil {
-						t.Fatal("temporarily ineligible memory offer could be executed")
+				if interruption == "pressure dip" {
+					current, err := d.OfferedFixes()
+					if err != nil || len(current) != len(original) {
+						t.Fatalf("one-sample pressure dip dropped the memory offer: %+v, %v", current, err)
+					}
+					for i, offer := range original {
+						if err := d.offerValid(offer); err != nil || current[i].ID != offer.ID || current[i].AlertID != alert.ID {
+							t.Fatalf("one-sample pressure dip did not keep the original offer: %+v, %v", current, err)
+						}
+					}
+				} else {
+					if current, err := d.OfferedFixes(); err != nil || len(current) != 0 {
+						t.Fatalf("ineligible memory fixes remained available: %+v, %v", current, err)
+					}
+					for _, offer := range original {
+						if _, err := d.ApplyOffer(context.Background(), offer.ID, "", true); err == nil {
+							t.Fatal("temporarily ineligible memory offer could be executed")
+						}
 					}
 				}
 				snap.Host.MemoryPressure = "warn"

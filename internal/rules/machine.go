@@ -13,6 +13,12 @@ import (
 
 const memoryRecoveryGrace = 3 * time.Minute
 
+// memoryOfferDipTolerance is how long an active memory fix offer stays
+// available after pressure drops below the alert level. It is the same window
+// the memory alert itself uses before that incident clears, so one sample
+// below the level does not drop the offer.
+const memoryOfferDipTolerance = memoryRecoveryGrace
+
 // Sample is one plug-in's checks for the current snapshot.
 type Sample struct {
 	Plugin   plugins.Plugin
@@ -124,12 +130,15 @@ type hogWatch struct {
 
 // Memory pressure belongs to the machine. Process attribution is captured only
 // when the alert fires, and only that current process remains eligible for fixes.
+// block is why fixEligible is false for the latest sample. It is empty when
+// that sample can still take the fix, including a dip inside memoryOfferDipTolerance.
 type memoryWatch struct {
 	hogWatch
 	recovering  bool
 	belowSince  time.Time
 	fixEligible bool
 	serviceID   string
+	block       string
 }
 
 func (e *Engine) machine() *machineState {
@@ -258,6 +267,7 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 	if !snap.Host.MemoryPressureKnown || level < 0 {
 		w.recovering = false
 		w.fixEligible = false
+		w.block = "memory pressure is unknown"
 		return nil, false
 	}
 	want := spec.Level
@@ -268,20 +278,29 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 		return nil, false
 	}
 	if level < pressureRank(want) {
-		w.fixEligible = false
 		if !w.started {
+			w.fixEligible = false
+			w.block = "memory pressure is below the alert level"
 			return nil, false
 		}
 		if !w.recovering {
 			w.recovering = true
 			w.belowSince = now
 		}
-		if now.Sub(w.belowSince) < memoryRecoveryGrace {
+		// The offer uses the alert's own grace. A shorter dip, including one
+		// sample, keeps the fix while this incident is still active.
+		if now.Sub(w.belowSince) >= memoryOfferDipTolerance {
+			wasActive := w.active
+			*w = memoryWatch{}
+			return nil, wasActive
+		}
+		if !w.active {
+			w.fixEligible = false
+			w.block = "memory pressure is below the alert level"
 			return nil, false
 		}
-		wasActive := w.active
-		*w = memoryWatch{}
-		return nil, wasActive
+		w.fixEligible, w.block = memoryTargetMatch(w, snap, samples)
+		return nil, false
 	}
 	w.recovering = false
 	dur, ok := positiveDuration(spec.Duration)
@@ -299,15 +318,18 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 		serviceID = service.ID
 	}
 	if w.active {
-		w.fixEligible = found && w.pid == top.PID && w.name == sysprobe.DisplayName(top) && w.serviceID == serviceID
+		w.fixEligible, w.block = memoryTargetMatch(w, snap, samples)
 		return nil, false
 	}
 	// Keep the current above-threshold attribution even before the duration
 	// elapses, for validating a saved incident in a standalone approval command.
 	w.fixEligible = found
+	w.block = ""
 	w.pid, w.name, w.watched, w.serviceID = 0, "", false, ""
 	if found {
 		w.pid, w.name, w.watched, w.serviceID = top.PID, sysprobe.DisplayName(top), watched, serviceID
+	} else {
+		w.block = "the alerted process is no longer the largest memory user"
 	}
 	if now.Sub(w.since) < dur {
 		return nil, false
@@ -330,6 +352,23 @@ func (st *machineState) observeMemory(host plugins.Plugin, snap sysprobe.Snapsho
 	}
 	fields["name"] = w.name
 	return []Alert{unwatchedHogAlert(host, KindMemoryHog, w.name, fields, now)}, false
+}
+
+// memoryTargetMatch reports whether the alerted process is still the largest.
+func memoryTargetMatch(w *memoryWatch, snap sysprobe.Snapshot, samples []Sample) (bool, string) {
+	top, found := sysprobe.TopMemory(snap)
+	if !found {
+		return false, "the alerted process is no longer the largest memory user"
+	}
+	watched, service := watchedPlugin(samples, top)
+	serviceID := UnwatchedID
+	if watched {
+		serviceID = service.ID
+	}
+	if w.pid == top.PID && w.name == sysprobe.DisplayName(top) && w.serviceID == serviceID {
+		return true, ""
+	}
+	return false, "a different process is now the largest memory user"
 }
 
 func (st *machineState) sustain(w *hogWatch, top sysprobe.Process, samples []Sample, host plugins.Plugin, now time.Time, dur time.Duration, kind string, extra map[string]string) []Alert {
