@@ -5,7 +5,14 @@ import { NoopPush } from "./push";
 
 const MAX_BODY = 4096;
 const MAX_PAGE = 100;
+const RETAIN_MS = 24 * 60 * 60 * 1000;
+const RETAIN_PER_KIND = 50;
 const BOXES = new Set(["pairing", "alerts", "approvals", "results"]);
+
+// Rows at this age are dropped on the next write. Null created_at (rows from
+// before the column existed) is not aged out; the per-kind cap keeps the newest 50.
+const DELETE_OLD_SQL = "DELETE FROM events WHERE created_at <= ?";
+const DELETE_CAP_SQL = "DELETE FROM events WHERE kind = ? AND id < ?";
 
 type Stored = Record<string, unknown>;
 
@@ -33,6 +40,11 @@ export class Mailbox extends DurableObject {
       // Polls filter by kind and then id. Without this index SQLite walks
       // every rowid greater than `after`, including other kinds.
       this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind, id)");
+      if (!columnExists(this.ctx.storage.sql, "created_at")) {
+        this.ctx.storage.sql.exec("ALTER TABLE events ADD COLUMN created_at INTEGER");
+      }
+      this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)");
+      this.prune(Date.now());
     });
   }
 
@@ -91,11 +103,14 @@ export class Mailbox extends DurableObject {
       return text("json object required", 400);
     }
     const body = JSON.stringify(parsed);
+    const nowMs = Date.now();
     const row = this.ctx.storage.sql.exec<{ id: number }>(
-      "INSERT INTO events (kind, body) VALUES (?, ?) RETURNING id",
+      "INSERT INTO events (kind, body, created_at) VALUES (?, ?, ?) RETURNING id",
       kind,
       body,
+      nowMs,
     ).next().value;
+    this.prune(nowMs);
     const id = Number(row?.id ?? 0);
     const record = { id, kind, body: parsed as Stored };
     this.broadcast(record);
@@ -107,6 +122,23 @@ export class Mailbox extends DurableObject {
       return json({ stored: true, push: "stub", id });
     }
     return json({ stored: true, id });
+  }
+
+  private prune(nowMs: number): void {
+    this.ctx.storage.sql.exec(DELETE_OLD_SQL, nowMs - RETAIN_MS);
+    for (const kind of BOXES) {
+      const threshold = this.ctx.storage.sql
+        .exec<{ id: number }>(
+          "SELECT id FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+          kind,
+          RETAIN_PER_KIND - 1,
+        )
+        .next().value;
+      if (threshold === undefined) {
+        continue;
+      }
+      this.ctx.storage.sql.exec(DELETE_CAP_SQL, kind, Number(threshold.id));
+    }
   }
 
   private list(kind: string, url: URL): Response {
@@ -162,6 +194,15 @@ export class Mailbox extends DurableObject {
       }
     }
   }
+}
+
+function columnExists(sql: SqlStorage, name: string): boolean {
+  for (const row of sql.exec<{ name: string }>("PRAGMA table_info(events)")) {
+    if (row.name === name) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function json(body: unknown, status = 200): Response {
