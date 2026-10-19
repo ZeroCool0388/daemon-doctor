@@ -215,7 +215,7 @@ func testRunPollsApprovalsBetweenChecks(t *testing.T, inProcess bool) {
 	go func() { done <- d.Run(ctx, time.Hour, nil, func(err error) { t.Errorf("cycle: %v", err) }) }()
 	select {
 	case <-results:
-	case <-time.After(8 * time.Second):
+	case <-time.After(relayPollInterval + 15*time.Second):
 		t.Fatal("approval was not polled between checks")
 	}
 	cancel()

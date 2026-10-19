@@ -23,9 +23,9 @@ Daemon Doctor does that checking for you, all the time, and explains what it fou
 
 ### Relay (the go-between for the Mac and phone): **Cloudflare Worker**
 A "Worker" is a tiny program Cloudflare runs for you on its servers.
-- The Workers free tier allows 100,000 requests a day. Two Mac polls every five seconds use 34,560 requests/day. With a 30-second check interval, check-cycle polls add 5,760/day; one Android poll every 15 seconds adds 5,760/day while running. That is about 46,080/day before alert posts, approvals, retries, and pairing. More Macs or phones increase this total.
+- The Workers free tier allows 100,000 requests a day. Two Mac polls every sixty seconds use 2,880 requests/day. With a 30-second check interval, check-cycle polls add 5,760/day; one Android poll every 15 seconds adds 5,760/day while running. That is about 14,400/day before alert posts, approvals, retries, and pairing. More Macs or phones increase this total.
 - It never goes to sleep. Supabase's free projects pause after a week with no activity, which is the wrong trait for an alert system.
-- It stores alerts and approvals in a free Durable Object. The Mac polls the mailbox over HTTPS every five seconds.
+- It stores alerts and approvals in a free Durable Object. The Mac polls the mailbox over HTTPS every sixty seconds.
 - It can send phone pushes through Firebase Cloud Messaging (FCM, Google's free push service).
 - The relay is "dumb on purpose". It only passes messages along and can't make the Mac do anything (see the security model).
 
@@ -142,7 +142,7 @@ relay:
   url: https://your-relay.example.workers.dev
 ```
 
-`daemon-doctor pair --out pairing.png` prints a terminal QR and saves the same pairing payload as a PNG. It includes a random Mac id, public key, one-time code, and the configured relay origin. Approvals use the existing signature verifier; only local allowlisted fixes run, followed by a recheck and result post. Failed posts retry in memory while the process runs. Mailbox pages contain at most 100 records. Each intake polls within a shared 750 ms budget, then retries only one queued delivery with a 250 ms deadline; a failed retry moves to the back of the queue.
+`daemon-doctor pair --out pairing.png` prints a terminal QR and saves the same pairing payload as a PNG. It includes a random Mac id, public key, one-time code, and the configured relay origin. Approvals use the existing signature verifier; only local allowlisted fixes run, followed by a recheck and result post. Failed posts retry in memory while the process runs. Mailbox pages contain at most 100 records. Each intake polls within a shared 750 ms budget, then retries only one queued delivery with a 5 second deadline; a failed retry moves to the back of the queue.
 
 ## 9. Repo layout
 ```

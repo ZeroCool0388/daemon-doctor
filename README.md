@@ -164,7 +164,7 @@ flowchart LR
   W -- polled alerts --> Ph
 ```
 
-- **Mac:** checks on the configured interval, logs locally with secret-looking values blanked, and polls for pairing messages and approvals every five seconds as well as after check cycles.
+- **Mac:** checks on the configured interval, logs locally with secret-looking values blanked, and polls for pairing messages and approvals every sixty seconds as well as after check cycles.
 - **Relay:** a Cloudflare Worker with a SQLite-backed Durable Object per Mac id. It stores `pairing`, `alerts`, `approvals` and `results`; pages are capped at 100 records. It does not verify approvals or run commands.
 - **ntfy:** recommended for phone alerts. The daemon makes one bounded delivery attempt per confirmed Down, Stuck or recovery transition. Sending runs separately from monitoring; the topic stays in the local config.
 - **Android (optional):** shows alerts, service status and history, and signs approvals. It polls every 15 seconds while its process runs. The relay's push delivery is still a stub.
@@ -389,7 +389,7 @@ The suites cover scripted incidents, hostile-relay messages, shared nonce consum
 
 ## Cost and latency
 
-The program and app use free dependencies, and the relay is designed for the Workers free tier. With the example intervals, continuous Mac and Android polling is about 46,080 requests/day before message posts, retries and pairing. Usage determines whether a deployment stays within provider limits. End-to-end failure-to-phone and approval-to-result latency is not established by the demo.
+The program and app use free dependencies, and the relay is designed for the Workers free tier. With the example intervals, continuous Mac and Android polling is about 14,400 requests/day before message posts, retries and pairing. That figure is the sum of two Mac mailbox polls a minute (2,880), two polls on each 30-second check cycle (5,760) and one Android poll every 15 seconds (5,760). Usage determines whether a deployment stays within provider limits. End-to-end failure-to-phone and approval-to-result latency is not established by the demo.
 
 ## Limits and next steps
 
