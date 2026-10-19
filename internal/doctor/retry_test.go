@@ -42,6 +42,15 @@ func (s *slowTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	})}.RoundTrip(r)
 }
 
+func TestRelayPollAndPostBudgets(t *testing.T) {
+	if relayPollInterval != 60*time.Second {
+		t.Fatalf("poll interval %s", relayPollInterval)
+	}
+	if relayPostBudget != 5*time.Second {
+		t.Fatalf("post budget %s", relayPostBudget)
+	}
+}
+
 func TestMonitoringContinuesWithSlowRetriesInProcess(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -57,7 +66,7 @@ func TestMonitoringContinuesWithSlowRetriesInProcess(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		d.outbox = append(d.outbox, outgoing{kind: "alerts", body: map[string]string{"message": "example"}})
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*relayPostBudget+2*time.Second)
 	defer cancel()
 	cycles := 0
 	if err := d.Run(ctx, 20*time.Millisecond, func([]ServiceStatus) { cycles++ }, func(err error) { t.Error(err) }); err != nil {
@@ -103,8 +112,8 @@ func TestSlowRetryIsBoundedAndPollsFirstInProcess(t *testing.T) {
 	if _, err := d.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// One result delivery and only one queued retry may each consume 250 ms.
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+	// One result delivery and only one queued retry may each consume the post budget.
+	if elapsed := time.Since(start); elapsed > 2*relayPostBudget+time.Second {
 		t.Fatalf("retry backlog monopolised a cycle: %s", elapsed)
 	}
 	if transport.posts.Load() != 2 || transport.approvals.Load() != 1 || transport.postBeforeApproval.Load() {
@@ -119,7 +128,7 @@ func TestSlowRetryIsBoundedAndPollsFirstInProcess(t *testing.T) {
 	if _, err := d.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > time.Second || transport.posts.Load()-before != 1 {
+	if time.Since(start) > relayPostBudget+time.Second || transport.posts.Load()-before != 1 {
 		t.Fatal("retried more than one queued delivery")
 	}
 	if len(d.outbox) != 1001 {

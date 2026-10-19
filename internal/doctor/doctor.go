@@ -63,9 +63,9 @@ type outgoing struct {
 	body any
 }
 
-const relayPollInterval = 5 * time.Second
+const relayPollInterval = 60 * time.Second
 const relayPollBudget = 750 * time.Millisecond
-const relayPostBudget = 250 * time.Millisecond
+const relayPostBudget = 5 * time.Second
 
 // New validates plug-ins and returns a doctor.
 // reg may be nil to use the built-in checks. now may be nil to use time.Now.

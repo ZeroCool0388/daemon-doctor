@@ -5,7 +5,24 @@ import { NoopPush } from "./push";
 
 const MAX_BODY = 4096;
 const MAX_PAGE = 100;
+const RETAIN_MS = 24 * 60 * 60 * 1000;
+const RETAIN_PER_KIND = 50;
 const BOXES = new Set(["pairing", "alerts", "approvals", "results"]);
+
+// Bump this when the events table changes. A mailbox at this version skips
+// migration on later wakes, including cold polls.
+export const SCHEMA_VERSION = 1;
+
+export const POLL_SQL =
+  "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?";
+// store() drops rows at least this old. A null created_at, including a row
+// from before the column existed, stays until the per-kind cap.
+export const DELETE_OLD_SQL = "DELETE FROM events WHERE created_at <= ?";
+export const DELETE_CAP_SQL = "DELETE FROM events WHERE kind = ? AND id < ?";
+export const CAP_PROBE_SQL = "SELECT id FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1 OFFSET ?";
+export const ALERT_LOOKUP_SQL = "SELECT id FROM events WHERE alert_id = ? LIMIT 1";
+
+const SCHEMA_SQL = "SELECT value FROM meta WHERE key = 'schema'";
 
 type Stored = Record<string, unknown>;
 
@@ -25,11 +42,32 @@ export class Mailbox extends DurableObject {
     super(ctx, env);
     this.mcp = new RemoteMCP(ctx);
     ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS events (
+      if (this.schemaCurrent()) {
+        return;
+      }
+      const sql = this.ctx.storage.sql;
+      sql.exec(`CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         kind TEXT NOT NULL,
         body TEXT NOT NULL
       )`);
+      // Polls filter by kind and then id. Without this index SQLite walks
+      // every rowid greater than `after`, including other kinds.
+      sql.exec("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind, id)");
+      if (!columnExists(sql, "created_at")) {
+        sql.exec("ALTER TABLE events ADD COLUMN created_at INTEGER");
+      }
+      sql.exec("CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)");
+      this.migrateAlertIds();
+      this.prune(Date.now());
+      sql.exec(`CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value INTEGER NOT NULL
+      )`);
+      sql.exec(
+        "INSERT INTO meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        SCHEMA_VERSION,
+      );
     });
   }
 
@@ -87,23 +125,104 @@ export class Mailbox extends DurableObject {
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return text("json object required", 400);
     }
+    const fields = storedObject(parsed);
+    const alertID = kind === "alerts" && typeof fields.alert_id === "string" ? fields.alert_id : "";
+    const nowMs = Date.now();
+    if (alertID !== "") {
+      this.prune(nowMs);
+      const existing = this.ctx.storage.sql.exec<{ id: number }>(ALERT_LOOKUP_SQL, alertID).next().value;
+      if (existing !== undefined) {
+        return json({ stored: true, id: Number(existing.id) });
+      }
+    }
     const body = JSON.stringify(parsed);
-    const row = this.ctx.storage.sql.exec<{ id: number }>(
-      "INSERT INTO events (kind, body) VALUES (?, ?) RETURNING id",
-      kind,
-      body,
-    ).next().value;
+    const row = this.ctx.storage.sql
+      .exec<{ id: number }>(
+        "INSERT INTO events (kind, body, created_at, alert_id) VALUES (?, ?, ?, ?) RETURNING id",
+        kind,
+        body,
+        nowMs,
+        alertID === "" ? null : alertID,
+      )
+      .next().value;
+    this.prune(nowMs);
     const id = Number(row?.id ?? 0);
-    const record = { id, kind, body: parsed as Stored };
+    const record = { id, kind, body: fields };
     this.broadcast(record);
     if (kind === "alerts") {
-      const fields = parsed as Stored;
-      const alertID = typeof fields.alert_id === "string" ? fields.alert_id : "";
       const message = typeof fields.message === "string" ? fields.message : "";
       await new NoopPush().deliver(macID, alertID, message);
       return json({ stored: true, push: "stub", id });
     }
     return json({ stored: true, id });
+  }
+
+  // A timed-out alert post can already be stored. Later posts of that alert_id
+  // must not add another row. Multiple NULLs stay allowed for other kinds.
+  private migrateAlertIds(): void {
+    const sql = this.ctx.storage.sql;
+    if (!columnExists(sql, "alert_id")) {
+      sql.exec("ALTER TABLE events ADD COLUMN alert_id TEXT");
+    }
+    const rows = sql.exec<{ id: number; body: string; alert_id: string | null }>(
+      "SELECT id, body, alert_id FROM events WHERE kind = 'alerts'",
+    );
+    const keeper = new Map<string, number>();
+    const pending: { id: number; alertID: string; stored: string | null }[] = [];
+    for (const row of rows) {
+      const stored = row.alert_id === null || row.alert_id === "" ? "" : row.alert_id;
+      const alertID = stored !== "" ? stored : alertIdFromBody(row.body);
+      const id = Number(row.id);
+      pending.push({ id, alertID, stored: row.alert_id });
+      if (alertID === "") {
+        continue;
+      }
+      const previous = keeper.get(alertID);
+      if (previous === undefined || id > previous) {
+        keeper.set(alertID, id);
+      }
+    }
+    for (const row of pending) {
+      if (row.alertID !== "" && keeper.get(row.alertID) !== row.id) {
+        sql.exec("DELETE FROM events WHERE id = ?", row.id);
+      }
+    }
+    for (const row of pending) {
+      if (row.alertID !== "" && keeper.get(row.alertID) === row.id && row.stored !== row.alertID) {
+        sql.exec("UPDATE events SET alert_id = ? WHERE id = ?", row.alertID, row.id);
+      }
+    }
+    // EXPLAIN of `alert_id = ?` against a partial index of non-empty ids is
+    // SCAN events. The same lookup searches that partial index only when the
+    // query also states `alert_id IS NOT NULL AND alert_id != ''`. This index
+    // is not partial, so ALERT_LOOKUP_SQL searches it, and several NULL ids fit.
+    sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS events_alert_id ON events(alert_id)");
+  }
+
+  private schemaCurrent(): boolean {
+    try {
+      const row = this.ctx.storage.sql.exec<{ value: number }>(SCHEMA_SQL).next().value;
+      return Number(row?.value ?? 0) >= SCHEMA_VERSION;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("no such table")) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  private prune(nowMs: number): void {
+    this.ctx.storage.sql.exec(DELETE_OLD_SQL, nowMs - RETAIN_MS);
+    for (const kind of BOXES) {
+      const threshold = this.ctx.storage.sql
+        .exec<{ id: number }>(CAP_PROBE_SQL, kind, RETAIN_PER_KIND - 1)
+        .next().value;
+      if (threshold === undefined) {
+        continue;
+      }
+      this.ctx.storage.sql.exec(DELETE_CAP_SQL, kind, Number(threshold.id));
+    }
   }
 
   private list(kind: string, url: URL): Response {
@@ -114,12 +233,7 @@ export class Mailbox extends DurableObject {
     }
     const limit = Math.min(requested, MAX_PAGE);
     const events = [];
-    const rows = this.ctx.storage.sql.exec<EventRow>(
-      "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?",
-      kind,
-      after,
-      limit + 1,
-    );
+    const rows = this.ctx.storage.sql.exec<EventRow>(POLL_SQL, kind, after, limit + 1);
     for (const row of rows) {
       events.push({
         id: Number(row.id),
@@ -159,6 +273,36 @@ export class Mailbox extends DurableObject {
       }
     }
   }
+}
+
+function storedObject(value: object): Stored {
+  const fields: Stored = {};
+  for (const [key, entry] of Object.entries(value)) {
+    fields[key] = entry;
+  }
+  return fields;
+}
+
+function alertIdFromBody(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "";
+    }
+    const alertID = storedObject(parsed).alert_id;
+    return typeof alertID === "string" ? alertID : "";
+  } catch {
+    return "";
+  }
+}
+
+function columnExists(sql: SqlStorage, name: string): boolean {
+  for (const row of sql.exec<{ name: string }>("PRAGMA table_info(events)")) {
+    if (row.name === name) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function json(body: unknown, status = 200): Response {

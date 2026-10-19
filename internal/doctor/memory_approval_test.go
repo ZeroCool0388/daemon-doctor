@@ -88,7 +88,7 @@ func TestMemoryPhoneApprovalRejectsIneligibleFixWithoutConsuming(t *testing.T) {
 						t.Fatal("signed approval executed an ineligible memory fix")
 					}
 				} else {
-					// Exercise the five-second relay poll path between check cycles.
+					// Exercise the relay poll path between check cycles.
 					box := &fakeRelay{macID: mac.MacID()}
 					client := inProcessRelay(t, box)
 					d.UseRelay(mac, client)
