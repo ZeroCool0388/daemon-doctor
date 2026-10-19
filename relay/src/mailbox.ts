@@ -44,6 +44,7 @@ export class Mailbox extends DurableObject {
         this.ctx.storage.sql.exec("ALTER TABLE events ADD COLUMN created_at INTEGER");
       }
       this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)");
+      this.migrateAlertIds();
       this.prune(Date.now());
     });
   }
@@ -102,26 +103,80 @@ export class Mailbox extends DurableObject {
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return text("json object required", 400);
     }
-    const body = JSON.stringify(parsed);
+    const fields = parsed as Stored;
+    const alertID = kind === "alerts" && typeof fields.alert_id === "string" ? fields.alert_id : "";
     const nowMs = Date.now();
-    const row = this.ctx.storage.sql.exec<{ id: number }>(
-      "INSERT INTO events (kind, body, created_at) VALUES (?, ?, ?) RETURNING id",
-      kind,
-      body,
-      nowMs,
-    ).next().value;
+    if (alertID !== "") {
+      const existing = this.ctx.storage.sql
+        .exec<{ id: number }>("SELECT id FROM events WHERE alert_id = ? LIMIT 1", alertID)
+        .next().value;
+      if (existing !== undefined) {
+        this.prune(nowMs);
+        return json({ stored: true, id: Number(existing.id) });
+      }
+    }
+    const body = JSON.stringify(parsed);
+    const row = this.ctx.storage.sql
+      .exec<{ id: number }>(
+        "INSERT INTO events (kind, body, created_at, alert_id) VALUES (?, ?, ?, ?) RETURNING id",
+        kind,
+        body,
+        nowMs,
+        alertID === "" ? null : alertID,
+      )
+      .next().value;
     this.prune(nowMs);
     const id = Number(row?.id ?? 0);
-    const record = { id, kind, body: parsed as Stored };
+    const record = { id, kind, body: fields };
     this.broadcast(record);
     if (kind === "alerts") {
-      const fields = parsed as Stored;
-      const alertID = typeof fields.alert_id === "string" ? fields.alert_id : "";
       const message = typeof fields.message === "string" ? fields.message : "";
       await new NoopPush().deliver(macID, alertID, message);
       return json({ stored: true, push: "stub", id });
     }
     return json({ stored: true, id });
+  }
+
+  // A timed-out alert post can already be stored. Later posts of that alert_id
+  // must not add another row. Multiple NULLs stay allowed for other kinds.
+  private migrateAlertIds(): void {
+    const sql = this.ctx.storage.sql;
+    if (!columnExists(sql, "alert_id")) {
+      sql.exec("ALTER TABLE events ADD COLUMN alert_id TEXT");
+    }
+    const rows = sql.exec<{ id: number; body: string; alert_id: string | null }>(
+      "SELECT id, body, alert_id FROM events WHERE kind = 'alerts'",
+    );
+    const keeper = new Map<string, number>();
+    const pending: { id: number; alertID: string; stored: string | null }[] = [];
+    for (const row of rows) {
+      const stored = row.alert_id === null || row.alert_id === "" ? "" : row.alert_id;
+      const alertID = stored !== "" ? stored : alertIdFromBody(row.body);
+      const id = Number(row.id);
+      pending.push({ id, alertID, stored: row.alert_id });
+      if (alertID === "") {
+        continue;
+      }
+      const previous = keeper.get(alertID);
+      if (previous === undefined || id > previous) {
+        keeper.set(alertID, id);
+      }
+    }
+    for (const row of pending) {
+      if (row.alertID === "") {
+        continue;
+      }
+      if (keeper.get(row.alertID) !== row.id) {
+        sql.exec("DELETE FROM events WHERE id = ?", row.id);
+        continue;
+      }
+      if (row.stored !== row.alertID) {
+        sql.exec("UPDATE events SET alert_id = ? WHERE id = ?", row.alertID, row.id);
+      }
+    }
+    // A partial index is not a candidate for `alert_id = ?`, because the bound
+    // value is not known to be non-empty. Multiple NULLs remain distinct.
+    sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS events_alert_id ON events(alert_id)");
   }
 
   private prune(nowMs: number): void {
@@ -193,6 +248,19 @@ export class Mailbox extends DurableObject {
         this.sockets.delete(socket);
       }
     }
+  }
+}
+
+function alertIdFromBody(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "";
+    }
+    const alertID = (parsed as Stored).alert_id;
+    return typeof alertID === "string" ? alertID : "";
+  } catch {
+    return "";
   }
 }
 
