@@ -1,15 +1,15 @@
 import { env, evictDurableObject, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import {
+  ALERT_LOOKUP_SQL,
+  CAP_PROBE_SQL,
+  DELETE_CAP_SQL,
+  DELETE_OLD_SQL,
+  POLL_SQL,
+  SCHEMA_VERSION,
+} from "../src/mailbox";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-// Delete statements Mailbox uses on writes. The plan assertions track these strings.
-const DELETE_OLD_SQL = "DELETE FROM events WHERE created_at <= ?";
-const DELETE_CAP_SQL = "DELETE FROM events WHERE kind = ? AND id < ?";
-
-// The Mac poll in Mailbox.list. Kept here so the plan assertion tracks that query.
-const POLL_SQL =
-  "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?";
 
 function mac(n: number): string {
   return n.toString(16).padStart(32, "a");
@@ -42,6 +42,18 @@ function countKind(sql: SqlStorage, kind: string): number {
   return Number(row?.n ?? 0);
 }
 
+function schemaVersion(sql: SqlStorage): number | null {
+  try {
+    const row = sql.exec<{ value: number }>("SELECT value FROM meta WHERE key = 'schema'").next().value;
+    if (row === undefined) {
+      return null;
+    }
+    return Number(row.value);
+  } catch {
+    return null;
+  }
+}
+
 async function post(id: string, kind: string, body: unknown): Promise<Response> {
   return SELF.fetch(box(id, kind), { method: "POST", body: JSON.stringify(body) });
 }
@@ -63,6 +75,8 @@ describe("mailbox query plan", () => {
     const found = await withSql(id, (sql) => ({
       age: plans(sql, DELETE_OLD_SQL, 0).join("\n"),
       cap: plans(sql, DELETE_CAP_SQL, "alerts", 1).join("\n"),
+      probe: plans(sql, CAP_PROBE_SQL, "alerts", 49).join("\n"),
+      lookup: plans(sql, ALERT_LOOKUP_SQL, "abcdef0123456789abcdef0123456789").join("\n"),
     }));
     expect(found.age).toContain("SEARCH");
     expect(found.age).toContain("INDEX events_created_at");
@@ -70,6 +84,12 @@ describe("mailbox query plan", () => {
     expect(found.cap).toContain("SEARCH");
     expect(found.cap).toContain("INDEX events_kind_id");
     expect(found.cap).not.toContain("SCAN");
+    expect(found.probe).toContain("SEARCH");
+    expect(found.probe).toContain("INDEX events_kind_id");
+    expect(found.probe).not.toContain("SCAN");
+    expect(found.lookup).toContain("SEARCH");
+    expect(found.lookup).toContain("INDEX events_alert_id");
+    expect(found.lookup).not.toContain("SCAN");
   });
 });
 
@@ -138,38 +158,139 @@ describe("mailbox retention", () => {
     expect(after).toBe(before);
   });
 
-  it("caps a pre-migration backlog when the object wakes", async () => {
+  it("migrates the original three-column table once", async () => {
     const id = mac(6);
+    const dup = "a".repeat(32);
     const stub = env.MAILBOX.get(env.MAILBOX.idFromName(id));
     await runInDurableObject(stub, async (_instance, state) => {
       const sql = state.storage.sql;
-      for (let n = 0; n < 80; n++) {
+      sql.exec("DROP TABLE IF EXISTS events");
+      sql.exec("DROP TABLE IF EXISTS meta");
+      sql.exec(`CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        body TEXT NOT NULL
+      )`);
+      for (let n = 0; n < 40; n++) {
         sql.exec(
-          "INSERT INTO events (kind, body, created_at) VALUES (?, ?, NULL)",
+          "INSERT INTO events (kind, body) VALUES (?, ?)",
           "alerts",
-          JSON.stringify({ alert_id: alertId(n, "1"), message: "old" }),
+          JSON.stringify({ alert_id: alertId(n, "9"), message: "filler" }),
         );
       }
-      for (let n = 0; n < 10; n++) {
+      sql.exec(
+        "INSERT INTO events (kind, body) VALUES (?, ?)",
+        "alerts",
+        JSON.stringify({ alert_id: dup, message: "old-dup" }),
+      );
+      for (let n = 40; n < 60; n++) {
         sql.exec(
-          "INSERT INTO events (kind, body, created_at) VALUES (?, ?, NULL)",
-          "results",
-          JSON.stringify({ n }),
+          "INSERT INTO events (kind, body) VALUES (?, ?)",
+          "alerts",
+          JSON.stringify({ alert_id: alertId(n, "9"), message: "filler" }),
         );
       }
+      sql.exec(
+        "INSERT INTO events (kind, body) VALUES (?, ?)",
+        "alerts",
+        JSON.stringify({ alert_id: dup, message: "new-dup" }),
+      );
+      for (let n = 0; n < 3; n++) {
+        sql.exec("INSERT INTO events (kind, body) VALUES (?, ?)", "approvals", JSON.stringify({ n }));
+      }
+      sql.exec("INSERT INTO events (kind, body) VALUES (?, ?)", "pairing", JSON.stringify({ hello: true }));
+      sql.exec("INSERT INTO events (kind, body) VALUES (?, ?)", "results", JSON.stringify({ ok: true }));
     });
     await evictDurableObject(stub);
-    const alerts = (await (await SELF.fetch(`${box(id, "alerts")}?limit=100`)).json()) as {
-      events: { body: { alert_id?: string } }[];
-    };
-    const results = (await (await SELF.fetch(`${box(id, "results")}?limit=100`)).json()) as {
-      events: unknown[];
+    const alertResponse = await SELF.fetch(`${box(id, "alerts")}?limit=100`);
+    expect(alertResponse.status).toBe(200);
+    const alerts = (await alertResponse.json()) as {
+      events: { body: { alert_id?: string; message?: string } }[];
     };
     expect(alerts.events).toHaveLength(50);
-    expect(results.events).toHaveLength(10);
-    const ids = alerts.events.map((event) => event.body.alert_id);
-    expect(ids).toContain(alertId(79, "1"));
-    expect(ids).not.toContain(alertId(0, "1"));
+    const copies = alerts.events.filter((event) => event.body.alert_id === dup);
+    expect(copies).toHaveLength(1);
+    expect(copies[0]?.body.message).toBe("new-dup");
+    const approvals = (await (await SELF.fetch(`${box(id, "approvals")}?limit=100`)).json()) as { events: unknown[] };
+    const pairing = (await (await SELF.fetch(`${box(id, "pairing")}?limit=100`)).json()) as { events: unknown[] };
+    const results = (await (await SELF.fetch(`${box(id, "results")}?limit=100`)).json()) as { events: unknown[] };
+    expect(approvals.events).toHaveLength(3);
+    expect(pairing.events).toHaveLength(1);
+    expect(results.events).toHaveLength(1);
+    const indexName = await withSql(id, (sql) => {
+      const row = sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'events_alert_id'")
+        .next().value;
+      return row?.name ?? "";
+    });
+    expect(indexName).toBe("events_alert_id");
+    expect(await withSql(id, schemaVersion)).toBe(SCHEMA_VERSION);
+  });
+
+  it("does not delete or migrate again on a cold poll", async () => {
+    const id = mac(10);
+    const keep = "c".repeat(32);
+    const stale = "d".repeat(32);
+    expect((await post(id, "alerts", { alert_id: keep, message: "keep" })).status).toBe(200);
+    await withSql(id, (sql) => {
+      sql.exec(
+        "INSERT INTO events (kind, body, created_at, alert_id) VALUES (?, ?, ?, NULL)",
+        "alerts",
+        JSON.stringify({ alert_id: stale, message: "stale" }),
+        Date.now() - DAY_MS,
+      );
+    });
+    const before = await withSql(id, (sql) => ({
+      version: schemaVersion(sql),
+      rows: countKind(sql, "alerts"),
+      backfill: sql
+        .exec<{ alert_id: string | null }>(
+          "SELECT alert_id FROM events WHERE body LIKE ?",
+          '%"message":"stale"%',
+        )
+        .next().value?.alert_id,
+    }));
+    expect(before.version).toBe(SCHEMA_VERSION);
+    expect(before.rows).toBe(2);
+    expect(before.backfill ?? null).toBeNull();
+    const stub = env.MAILBOX.get(env.MAILBOX.idFromName(id));
+    await evictDurableObject(stub);
+    const polled = await SELF.fetch(`${box(id, "alerts")}?after=0`);
+    expect(polled.status).toBe(200);
+    const after = await withSql(id, (sql) => ({
+      version: schemaVersion(sql),
+      rows: countKind(sql, "alerts"),
+      backfill: sql
+        .exec<{ alert_id: string | null }>(
+          "SELECT alert_id FROM events WHERE body LIKE ?",
+          '%"message":"stale"%',
+        )
+        .next().value?.alert_id,
+    }));
+    expect(after.version).toBe(before.version);
+    expect(after.rows).toBe(before.rows);
+    expect(after.backfill ?? null).toBeNull();
+    const page = (await polled.json()) as { events: { body: { message?: string } }[] };
+    expect(page.events.map((event) => event.body.message).sort()).toEqual(["keep", "stale"]);
+  });
+
+  it("does not ack an alert id that retention just removed", async () => {
+    const id = mac(12);
+    const alertID = "b".repeat(32);
+    const first = (await (await post(id, "alerts", { alert_id: alertID, message: "one" })).json()) as { id: number };
+    await withSql(id, (sql) => {
+      sql.exec("UPDATE events SET created_at = ? WHERE id = ?", Date.now() - DAY_MS, first.id);
+    });
+    const secondResponse = await post(id, "alerts", { alert_id: alertID, message: "retry" });
+    expect(secondResponse.status).toBe(200);
+    const second = (await secondResponse.json()) as { id: number; stored: boolean };
+    expect(second.stored).toBe(true);
+    const page = (await (await SELF.fetch(box(id, "alerts"))).json()) as {
+      events: { id: number; body: { message?: string } }[];
+    };
+    expect(page.events.map((event) => event.id)).toContain(second.id);
+    expect(page.events.map((event) => event.id)).not.toContain(first.id);
+    expect(page.events.find((event) => event.id === second.id)?.body.message).toBe("retry");
   });
 
   it("ignores a repeated alert id", async () => {
@@ -225,11 +346,9 @@ describe("mailbox retention", () => {
   it("looks up an alert id on events_alert_id", async () => {
     const id = mac(8);
     await SELF.fetch(box(id, "pairing"));
-    const joined = (
-      await withSql(id, (sql) =>
-        plans(sql, "SELECT id FROM events WHERE alert_id = ? LIMIT 1", "abcdef0123456789abcdef0123456789"),
-      )
-    ).join("\n");
+    const joined = (await withSql(id, (sql) => plans(sql, ALERT_LOOKUP_SQL, "abcdef0123456789abcdef0123456789"))).join(
+      "\n",
+    );
     expect(joined).toContain("SEARCH");
     expect(joined).toContain("INDEX events_alert_id");
     expect(joined).not.toContain("SCAN");
