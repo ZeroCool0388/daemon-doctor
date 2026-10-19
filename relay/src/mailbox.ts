@@ -103,7 +103,7 @@ export class Mailbox extends DurableObject {
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return text("json object required", 400);
     }
-    const fields = parsed as Stored;
+    const fields = storedObject(parsed);
     const alertID = kind === "alerts" && typeof fields.alert_id === "string" ? fields.alert_id : "";
     const nowMs = Date.now();
     if (alertID !== "") {
@@ -163,14 +163,12 @@ export class Mailbox extends DurableObject {
       }
     }
     for (const row of pending) {
-      if (row.alertID === "") {
-        continue;
-      }
-      if (keeper.get(row.alertID) !== row.id) {
+      if (row.alertID !== "" && keeper.get(row.alertID) !== row.id) {
         sql.exec("DELETE FROM events WHERE id = ?", row.id);
-        continue;
       }
-      if (row.stored !== row.alertID) {
+    }
+    for (const row of pending) {
+      if (row.alertID !== "" && keeper.get(row.alertID) === row.id && row.stored !== row.alertID) {
         sql.exec("UPDATE events SET alert_id = ? WHERE id = ?", row.alertID, row.id);
       }
     }
@@ -251,13 +249,21 @@ export class Mailbox extends DurableObject {
   }
 }
 
+function storedObject(value: object): Stored {
+  const fields: Stored = {};
+  for (const [key, entry] of Object.entries(value)) {
+    fields[key] = entry;
+  }
+  return fields;
+}
+
 function alertIdFromBody(body: string): string {
   try {
     const parsed: unknown = JSON.parse(body);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return "";
     }
-    const alertID = (parsed as Stored).alert_id;
+    const alertID = storedObject(parsed).alert_id;
     return typeof alertID === "string" ? alertID : "";
   } catch {
     return "";
