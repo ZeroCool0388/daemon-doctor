@@ -9,10 +9,20 @@ const RETAIN_MS = 24 * 60 * 60 * 1000;
 const RETAIN_PER_KIND = 50;
 const BOXES = new Set(["pairing", "alerts", "approvals", "results"]);
 
-// Rows at this age are dropped on the next write. Null created_at (rows from
-// before the column existed) is not aged out; the per-kind cap keeps the newest 50.
-const DELETE_OLD_SQL = "DELETE FROM events WHERE created_at <= ?";
-const DELETE_CAP_SQL = "DELETE FROM events WHERE kind = ? AND id < ?";
+// Bump this when the events table changes. A mailbox at this version skips
+// migration on later wakes, including cold polls.
+export const SCHEMA_VERSION = 1;
+
+export const POLL_SQL =
+  "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?";
+// store() drops rows at least this old. A null created_at, including a row
+// from before the column existed, stays until the per-kind cap.
+export const DELETE_OLD_SQL = "DELETE FROM events WHERE created_at <= ?";
+export const DELETE_CAP_SQL = "DELETE FROM events WHERE kind = ? AND id < ?";
+export const CAP_PROBE_SQL = "SELECT id FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1 OFFSET ?";
+export const ALERT_LOOKUP_SQL = "SELECT id FROM events WHERE alert_id = ? LIMIT 1";
+
+const SCHEMA_SQL = "SELECT value FROM meta WHERE key = 'schema'";
 
 type Stored = Record<string, unknown>;
 
@@ -32,20 +42,32 @@ export class Mailbox extends DurableObject {
     super(ctx, env);
     this.mcp = new RemoteMCP(ctx);
     ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS events (
+      if (this.schemaCurrent()) {
+        return;
+      }
+      const sql = this.ctx.storage.sql;
+      sql.exec(`CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         kind TEXT NOT NULL,
         body TEXT NOT NULL
       )`);
       // Polls filter by kind and then id. Without this index SQLite walks
       // every rowid greater than `after`, including other kinds.
-      this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind, id)");
-      if (!columnExists(this.ctx.storage.sql, "created_at")) {
-        this.ctx.storage.sql.exec("ALTER TABLE events ADD COLUMN created_at INTEGER");
+      sql.exec("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind, id)");
+      if (!columnExists(sql, "created_at")) {
+        sql.exec("ALTER TABLE events ADD COLUMN created_at INTEGER");
       }
-      this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)");
+      sql.exec("CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)");
       this.migrateAlertIds();
       this.prune(Date.now());
+      sql.exec(`CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value INTEGER NOT NULL
+      )`);
+      sql.exec(
+        "INSERT INTO meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        SCHEMA_VERSION,
+      );
     });
   }
 
@@ -107,11 +129,9 @@ export class Mailbox extends DurableObject {
     const alertID = kind === "alerts" && typeof fields.alert_id === "string" ? fields.alert_id : "";
     const nowMs = Date.now();
     if (alertID !== "") {
-      const existing = this.ctx.storage.sql
-        .exec<{ id: number }>("SELECT id FROM events WHERE alert_id = ? LIMIT 1", alertID)
-        .next().value;
+      this.prune(nowMs);
+      const existing = this.ctx.storage.sql.exec<{ id: number }>(ALERT_LOOKUP_SQL, alertID).next().value;
       if (existing !== undefined) {
-        this.prune(nowMs);
         return json({ stored: true, id: Number(existing.id) });
       }
     }
@@ -172,20 +192,31 @@ export class Mailbox extends DurableObject {
         sql.exec("UPDATE events SET alert_id = ? WHERE id = ?", row.alertID, row.id);
       }
     }
-    // A partial index is not a candidate for `alert_id = ?`, because the bound
-    // value is not known to be non-empty. Multiple NULLs remain distinct.
+    // EXPLAIN of `alert_id = ?` against a partial index of non-empty ids is
+    // SCAN events. The same lookup searches that partial index only when the
+    // query also states `alert_id IS NOT NULL AND alert_id != ''`. This index
+    // is not partial, so ALERT_LOOKUP_SQL searches it, and several NULL ids fit.
     sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS events_alert_id ON events(alert_id)");
+  }
+
+  private schemaCurrent(): boolean {
+    try {
+      const row = this.ctx.storage.sql.exec<{ value: number }>(SCHEMA_SQL).next().value;
+      return Number(row?.value ?? 0) >= SCHEMA_VERSION;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("no such table")) {
+        return false;
+      }
+      throw err;
+    }
   }
 
   private prune(nowMs: number): void {
     this.ctx.storage.sql.exec(DELETE_OLD_SQL, nowMs - RETAIN_MS);
     for (const kind of BOXES) {
       const threshold = this.ctx.storage.sql
-        .exec<{ id: number }>(
-          "SELECT id FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
-          kind,
-          RETAIN_PER_KIND - 1,
-        )
+        .exec<{ id: number }>(CAP_PROBE_SQL, kind, RETAIN_PER_KIND - 1)
         .next().value;
       if (threshold === undefined) {
         continue;
@@ -202,12 +233,7 @@ export class Mailbox extends DurableObject {
     }
     const limit = Math.min(requested, MAX_PAGE);
     const events = [];
-    const rows = this.ctx.storage.sql.exec<EventRow>(
-      "SELECT id, kind, body FROM events WHERE kind = ? AND id > ? ORDER BY id ASC LIMIT ?",
-      kind,
-      after,
-      limit + 1,
-    );
+    const rows = this.ctx.storage.sql.exec<EventRow>(POLL_SQL, kind, after, limit + 1);
     for (const row of rows) {
       events.push({
         id: Number(row.id),

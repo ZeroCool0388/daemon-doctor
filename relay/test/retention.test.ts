@@ -231,29 +231,32 @@ describe("mailbox retention", () => {
     const id = mac(10);
     const keep = "c".repeat(32);
     const stale = "d".repeat(32);
-    expect((await post(id, "alerts", { alert_id: keep, message: "keep" })).status).toBe(200);
-    await withSql(id, (sql) => {
+    const stub = env.MAILBOX.get(env.MAILBOX.idFromName(id));
+    const before = await runInDurableObject(stub, async (instance, state) => {
+      const posted = await instance.fetch(
+        new Request(box(id, "alerts"), {
+          method: "POST",
+          body: JSON.stringify({ alert_id: keep, message: "keep" }),
+        }),
+      );
+      if (posted.status !== 200) {
+        throw new Error(`post ${posted.status}`);
+      }
+      const sql = state.storage.sql;
       sql.exec(
         "INSERT INTO events (kind, body, created_at, alert_id) VALUES (?, ?, ?, NULL)",
         "alerts",
         JSON.stringify({ alert_id: stale, message: "stale" }),
         Date.now() - DAY_MS,
       );
+      const backfill = sql
+        .exec<{ alert_id: string | null }>("SELECT alert_id FROM events WHERE body LIKE ?", '%"message":"stale"%')
+        .next().value?.alert_id;
+      return { version: schemaVersion(sql), rows: countKind(sql, "alerts"), backfill: backfill ?? null };
     });
-    const before = await withSql(id, (sql) => ({
-      version: schemaVersion(sql),
-      rows: countKind(sql, "alerts"),
-      backfill: sql
-        .exec<{ alert_id: string | null }>(
-          "SELECT alert_id FROM events WHERE body LIKE ?",
-          '%"message":"stale"%',
-        )
-        .next().value?.alert_id,
-    }));
     expect(before.version).toBe(SCHEMA_VERSION);
     expect(before.rows).toBe(2);
-    expect(before.backfill ?? null).toBeNull();
-    const stub = env.MAILBOX.get(env.MAILBOX.idFromName(id));
+    expect(before.backfill).toBeNull();
     await evictDurableObject(stub);
     const polled = await SELF.fetch(`${box(id, "alerts")}?after=0`);
     expect(polled.status).toBe(200);
