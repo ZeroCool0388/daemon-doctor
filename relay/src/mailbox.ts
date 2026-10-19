@@ -30,6 +30,9 @@ export class Mailbox extends DurableObject {
         kind TEXT NOT NULL,
         body TEXT NOT NULL
       )`);
+      // Polls filter by kind and then id. Without this index SQLite walks
+      // every rowid greater than `after`, including other kinds.
+      this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind, id)");
     });
   }
 
