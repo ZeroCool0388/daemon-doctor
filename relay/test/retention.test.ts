@@ -171,4 +171,67 @@ describe("mailbox retention", () => {
     expect(ids).toContain(alertId(79, "1"));
     expect(ids).not.toContain(alertId(0, "1"));
   });
+
+  it("ignores a repeated alert id", async () => {
+    const id = mac(7);
+    const alertID = "abcdef0123456789abcdef0123456789";
+    const first = (await (await post(id, "alerts", { alert_id: alertID, message: "one" })).json()) as {
+      id: number;
+      stored: boolean;
+      push?: string;
+    };
+    expect(first.stored).toBe(true);
+    expect(first.push).toBe("stub");
+
+    const opened = await SELF.fetch(box(id, "ws"), { headers: { Upgrade: "websocket" } });
+    expect(opened.status).toBe(101);
+    const socket = opened.webSocket;
+    expect(socket).toBeTruthy();
+    socket?.accept();
+    const frames: string[] = [];
+    socket?.addEventListener("message", (event) => {
+      frames.push(String(event.data));
+    });
+
+    const secondResponse = await post(id, "alerts", { alert_id: alertID, message: "retry" });
+    expect(secondResponse.status).toBe(200);
+    const second = (await secondResponse.json()) as { id: number; stored: boolean; push?: string };
+    expect(second.stored).toBe(true);
+    expect(second.id).toBe(first.id);
+    expect(second.push).toBeUndefined();
+
+    const other = "fedcba9876543210fedcba9876543210";
+    const followed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no websocket frame")), 2000);
+      socket?.addEventListener("message", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    expect((await post(id, "alerts", { alert_id: other, message: "two" })).status).toBe(200);
+    await followed;
+    expect(frames).toHaveLength(1);
+    expect(JSON.parse(frames[0] ?? "{}")).toMatchObject({ body: { message: "two" } });
+    socket?.close();
+
+    const page = (await (await SELF.fetch(box(id, "alerts"))).json()) as {
+      events: { id: number; body: { message?: string } }[];
+    };
+    expect(page.events.map((event) => event.id)).toEqual([first.id, expect.any(Number)]);
+    expect(page.events[0]?.body.message).toBe("one");
+    expect(page.events).toHaveLength(2);
+  });
+
+  it("looks up an alert id on events_alert_id", async () => {
+    const id = mac(8);
+    await SELF.fetch(box(id, "pairing"));
+    const joined = (
+      await withSql(id, (sql) =>
+        plans(sql, "SELECT id FROM events WHERE alert_id = ? LIMIT 1", "abcdef0123456789abcdef0123456789"),
+      )
+    ).join("\n");
+    expect(joined).toContain("SEARCH");
+    expect(joined).toContain("INDEX events_alert_id");
+    expect(joined).not.toContain("SCAN");
+  });
 });
