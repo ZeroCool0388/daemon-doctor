@@ -27,8 +27,8 @@ describe("mailbox", () => {
   it("bounds backlog pages and can restart from zero", async () => {
     const id = mac(20);
     const body = JSON.stringify({ pad: "x".repeat(4000) });
-    // Stored bodies alone exceed the Mac client's 1 MiB response limit.
-    for (let n = 0; n < 300; n++) {
+    // More than the per-kind cap. Each page must stay under the Mac client's 1 MiB limit.
+    for (let n = 0; n < 60; n++) {
       const posted = await SELF.fetch(url(id, "approvals"), { method: "POST", body });
       expect(posted.status).toBe(200);
     }
@@ -48,7 +48,7 @@ describe("mailbox", () => {
         after = page.next_after;
         more = page.has_more;
       }
-      expect(count).toBe(300);
+      expect(count).toBe(50);
     }
     const first = (await (await SELF.fetch(`${url(id, "approvals")}?limit=3`)).json()) as { events: unknown[]; has_more: boolean };
     expect(first.events).toHaveLength(3);
