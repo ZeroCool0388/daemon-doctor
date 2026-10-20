@@ -227,7 +227,7 @@ fixes:
 
 Set `app` to the macOS app name and `launcher` to your local executable script that starts it with the required flags. `~` expands to your home directory. The script needs an executable bit and a shebang; it is run directly, with optional fixed `args`, without a shell command supplied by an approval.
 
-When the flags check fails, `relaunch` is offered ahead of `restart`. It asks the app to quit gracefully, waits up to `quit_timeout` (default 5 seconds, maximum 30 seconds), then uses KILL on surviving matched processes and their children, children first. It confirms exit before starting the launcher, waits up to 5 seconds for the required launch settings, and runs the full health checks. macOS may request Automation permission for the quit request. Dry runs perform no app control. The action uses the existing offer expiry, single-use approval, pause, and repeated-failure lockout checks.
+When the flags check fails, `relaunch` is offered ahead of `restart`. It asks the app to quit gracefully and waits up to `quit_timeout` (default 5 seconds, maximum 30 seconds). KILL on surviving processes requires a controller that can bind the signal to the verified process lifetime. The live OS controller cannot guarantee this with numeric PIDs, so it refuses the fallback, reports the fix as not completed and leaves the launcher unrun. After a confirmed graceful exit, it starts the launcher, waits up to 5 seconds for the required launch settings, and runs the full health checks. macOS may request Automation permission for the quit request. Dry runs perform no app control. The action uses the existing offer expiry, single-use approval, pause, and repeated-failure lockout checks.
 
 ### Alerts
 

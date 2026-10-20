@@ -18,10 +18,11 @@ import (
 
 type relaunchCtrl struct {
 	fakeCtrl
-	apps   []string
-	quit   func(context.Context) error
-	signal func(int) error
-	launch func() error
+	apps          []string
+	quit          func(context.Context) error
+	signal        func(int) error
+	signalProcess func(context.Context, sysprobe.Process, syscall.Signal) error
+	launch        func() error
 }
 
 func (c *relaunchCtrl) Quit(ctx context.Context, app string) error {
@@ -38,6 +39,14 @@ func (c *relaunchCtrl) Signal(pid int, sig syscall.Signal) error {
 		return c.signal(pid)
 	}
 	return nil
+}
+
+// This controller only records simulated signals; it never signals OS PIDs.
+func (c *relaunchCtrl) SignalProcess(ctx context.Context, process sysprobe.Process, sig syscall.Signal) error {
+	if c.signalProcess != nil {
+		return c.signalProcess(ctx, process, sig)
+	}
+	return c.Signal(process.PID, sig)
 }
 
 func (c *relaunchCtrl) Launch(ctx context.Context, path string, args []string) error {
@@ -279,6 +288,61 @@ func TestRelaunchChecksLifetimeAgainBeforeEachKill(t *testing.T) {
 	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
 	if err == nil || res.Fixed || !reflect.DeepEqual(ctrl.pids, []int{6}) || len(ctrl.launches) != 0 {
 		t.Fatalf("reused app PID killed: %+v %v %+v", res, err, ctrl)
+	}
+}
+
+func TestRelaunchRefusesKillWithoutLifetimeSignaler(t *testing.T) {
+	src := &sysprobe.MemSource{}
+	src.Set(flaggedTree(false))
+	ctrl := &relaunchCtrl{}
+	// Expose the numeric-PID controller and graceful quit only, like the live
+	// OSController. A matching fresh snapshot cannot make numeric KILL safe.
+	legacy := struct {
+		Controller
+		AppQuitter
+	}{ctrl, ctrl}
+	res, err := relaunchRunner(src, legacy).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot bind the signal to the process lifetime") || res.Fixed {
+		t.Fatalf("unsafe fallback accepted: %+v %v", res, err)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.launches) != 0 || !strings.Contains(res.Detail, "KILL refused") || strings.HasPrefix(res.Message, "Fixed.") {
+		t.Fatalf("refused fallback performed work or reported completion: %+v %+v", res, ctrl)
+	}
+}
+
+func TestRelaunchRefusesPIDReusedAfterFinalSnapshot(t *testing.T) {
+	src := &sysprobe.MemSource{}
+	initial := flaggedTree(false)
+	src.Set(initial)
+	ctrl := &relaunchCtrl{}
+	calls := 0
+	ctrl.signalProcess = func(ctx context.Context, expected sysprobe.Process, sig syscall.Signal) error {
+		calls++
+		if expected.PID != 6 || expected.StartTime != initial.Processes[1].StartTime || sig != syscall.SIGKILL || ctx.Err() != nil {
+			t.Fatalf("incorrect lifetime or signal: %+v %v", expected, sig)
+		}
+		// Reuse the PID after the runner's last snapshot, immediately before
+		// signal delivery. The replacement even passes the full health check.
+		replacement := flaggedTree(true)
+		replacement.Processes[1].StartTime++
+		src.Set(replacement)
+		if !sameProcess(expected, replacement.Processes[1]) {
+			return errors.New("process lifetime changed at signal delivery; KILL refused")
+		}
+		return ctrl.Signal(expected.PID, sig)
+	}
+	res, err := relaunchRunner(src, ctrl).Apply(context.Background(), relaunchPlugin(), plugins.FixRelaunch, false)
+	if err == nil || !strings.Contains(err.Error(), "changed at signal delivery") || calls != 1 || res.Fixed {
+		t.Fatalf("reused PID accepted: %+v %v calls=%d", res, err, calls)
+	}
+	if len(ctrl.pids) != 0 || len(ctrl.launches) != 0 || !checks.AllHealthy(res.Outcomes) {
+		t.Fatalf("replacement touched or refusal not preserved across healthy recheck: %+v %+v", res, ctrl)
+	}
+}
+
+func TestLiveControllerCannotAuthorizeRelaunchKill(t *testing.T) {
+	if _, safe := (Controller(OSController{})).(LifetimeSignaler); safe {
+		t.Fatal("numeric-PID OS controller must not authorize the relaunch KILL fallback")
 	}
 }
 
