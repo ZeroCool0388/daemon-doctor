@@ -1,0 +1,13 @@
+---
+description: How finished work is pushed and handed between machines and cloud agents
+alwaysApply: true
+---
+
+# Git hand-off rule
+
+- When work on any machine (Air, Mini or a cloud agent) finishes, commit it and push it to its own branch named `job/<short-description>`, e.g. `job/eval-pack-renewal-radar`. Never push to `main`.
+- The first push to GitHub for each repo needs Steve's yes. Once Steve has approved a repo, later pushes to non-main branches on that repo go ahead without asking.
+- Pushing to `main`, merging, opening a repo to the public, publishing and deploying always need Steve's yes, every time.
+- Before handing work to another machine or agent, push your branch. Before picking work up, pull the latest version of that branch first.
+- Never force-push, rebase shared branches or rewrite history to make a push work. If a push is rejected, stop and report it.
+- Commit as `Steve Grady <9111388+ZeroCool0388@users.noreply.github.com>`. Never commit secrets.
